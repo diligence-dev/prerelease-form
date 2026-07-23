@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Cancel Registration</title>
+	<style>
+		body {
+			font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+			line-height: 1.6;
+			margin: 0;
+			padding: 1rem;
+			max-width: 40rem;
+			color: #222;
+		}
+		input[type="email"] {
+			width: 100%;
+			padding: 0.5rem;
+			font-size: 1rem;
+			box-sizing: border-box;
+		}
+		button {
+			margin-top: 1rem;
+			padding: 0.75rem 1.25rem;
+			font-size: 1rem;
+			cursor: pointer;
+		}
+	</style>
+</head>
+<body>
+	<h1>Cancel Registration</h1>
+	<p>Enter the email address you signed up with to cancel your registration or waitlist spot.</p>
+	<form method="POST" action="/cancel">
+		<label for="email">Email</label>
+		<input type="email" id="email" name="email" required>
+		<button type="submit">Cancel</button>
+	</form>
+</body>
+</html>

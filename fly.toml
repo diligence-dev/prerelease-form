@@ -1,0 +1,15 @@
+app = "mtg-prerelease"
+primary_region = "fra"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[env]
+  DATA_PATH = "/data/data.db"
