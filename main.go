@@ -34,7 +34,8 @@ type smtpMailer struct {
 }
 
 func (m smtpMailer) Send(to, subject, body string) error {
-	msg := []byte("To: " + to + "\r\n" +
+	msg := []byte("From: " + m.from + "\r\n" +
+		"To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +
 		"\r\n" +
 		body + "\r\n")
