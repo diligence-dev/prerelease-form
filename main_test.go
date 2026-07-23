@@ -159,7 +159,7 @@ func TestSubmitValidDraft(t *testing.T) {
 	if !strings.Contains(mailer.sends[0].subject, "Payment details") {
 		t.Errorf("subject missing Payment details: %q", mailer.sends[0].subject)
 	}
-	for _, want := range []string{"€15", "wero@example.com", "DE1234567890", "/cancel"} {
+	for _, want := range []string{"15", "wero@example.com", "DE1234567890", "/cancel"} {
 		if !strings.Contains(mailer.sends[0].body, want) {
 			t.Errorf("body missing %q", want)
 		}
@@ -188,8 +188,8 @@ func TestSubmitValidSealed(t *testing.T) {
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
 	}
-	if !strings.Contains(mailer.sends[0].body, "€30") {
-		t.Errorf("body missing €30: %q", mailer.sends[0].body)
+	if !strings.Contains(mailer.sends[0].body, "30") {
+		t.Errorf("body missing 30: %q", mailer.sends[0].body)
 	}
 }
 
@@ -465,7 +465,7 @@ func TestDraftWaitlist(t *testing.T) {
 	if !strings.Contains(mailer.sends[0].body, "waitlist") {
 		t.Errorf("body missing waitlist: %q", mailer.sends[0].body)
 	}
-	for _, bad := range []string{"€15", "IBAN"} {
+	for _, bad := range []string{"15", "IBAN"} {
 		if strings.Contains(mailer.sends[0].body, bad) {
 			t.Errorf("body contains %q", bad)
 		}
@@ -507,7 +507,7 @@ func TestSealedWaitlist(t *testing.T) {
 	if status != "waitlist" {
 		t.Fatalf("status = %q, want waitlist", status)
 	}
-	for _, bad := range []string{"€30", "IBAN"} {
+	for _, bad := range []string{"30", "IBAN"} {
 		if strings.Contains(mailer.sends[0].body, bad) {
 			t.Errorf("body contains %q", bad)
 		}

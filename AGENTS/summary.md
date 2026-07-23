@@ -1,4 +1,4 @@
-# Project State: MTG Prerelease Signup
+# Project State: MtG Prerelease Signup
 
 ## What it is
 Single-binary Go web app for signing up to a Magic: The Gathering prerelease.
@@ -41,7 +41,10 @@ Required environment variables / Fly secrets:
 - `ADMIN_TOKEN` — protects `/submissions.csv`.
 - `SMTP_PASSWORD` — for `smtp.web.de` auth.
 - `WERO_EMAIL` — shown in payment emails.
+- `WERO_LINK` — payment link shown in payment emails.
 - `IBAN` — shown in payment emails.
+- `IBAN_RECIPIENT` — recipient name for IBAN payments.
+- `BIC` — BIC code for IBAN payments.
 
 Optional:
 - `ORGANIZER_EMAIL` — recipient of cancellation/waitlist/delivery-failure notifications; defaults to `diligence.dev@web.de`.

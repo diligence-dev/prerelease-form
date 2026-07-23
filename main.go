@@ -48,7 +48,10 @@ func (m smtpMailer) Send(to, subject, body string) error {
 // never read os.Getenv directly and required values are validated up front.
 type config struct {
 	weroEmail      string
+	weroLink       string
 	iban           string
+	ibanRecipient  string
+	bic            string
 	organizerEmail string
 	adminToken     string
 }
@@ -59,15 +62,27 @@ type config struct {
 func loadConfig() config {
 	cfg := config{
 		weroEmail:      os.Getenv("WERO_EMAIL"),
+		weroLink:       os.Getenv("WERO_LINK"),
 		iban:           os.Getenv("IBAN"),
+		ibanRecipient:  os.Getenv("IBAN_RECIPIENT"),
+		bic:            os.Getenv("BIC"),
 		organizerEmail: getenv("ORGANIZER_EMAIL", "diligence.dev@web.de"),
 		adminToken:     os.Getenv("ADMIN_TOKEN"),
 	}
 	if cfg.weroEmail == "" {
 		log.Fatalf("WERO_EMAIL not set")
 	}
+	if cfg.weroLink == "" {
+		log.Fatalf("WERO_LINK not set")
+	}
 	if cfg.iban == "" {
 		log.Fatalf("IBAN not set")
+	}
+	if cfg.ibanRecipient == "" {
+		log.Fatalf("IBAN_RECIPIENT not set")
+	}
+	if cfg.bic == "" {
+		log.Fatalf("BIC not set")
 	}
 	if cfg.organizerEmail == "" {
 		log.Fatalf("ORGANIZER_EMAIL not set")
@@ -256,9 +271,9 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			amount = 30
 		}
 
-		mailingInt := 0
+		mailingListInt := 0
 		if mailingList == "yes" {
-			mailingInt = 1
+			mailingListInt = 1
 		}
 
 		tx, err := db.Begin()
@@ -283,7 +298,7 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		createdAt := time.Now().UTC().Format(time.RFC3339)
 		_, err = tx.Exec(
 			"INSERT INTO submissions (email, name, format, mailing_list, created_at, status) VALUES (?, ?, ?, ?, ?, ?)",
-			email, name, format, mailingInt, createdAt, status,
+			email, name, format, mailingListInt, createdAt, status,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
@@ -303,18 +318,10 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		var subject, body string
 		if status == "confirmed" {
-			subject = "MTG Prerelease – Payment details"
-			body = fmt.Sprintf(`Hi %s,
-
-Thanks for signing up for %s.
-Please send €%d via Wero to %s (IBAN: %s).
-Use "%s" as reference.
-We'll mark you paid once we receive the Wero notification.
-
-If you can no longer attend, cancel at %s/cancel using your email address.
-`, name, formatName(format), amount, cfg.weroEmail, cfg.iban, name, host)
+			subject = "Prerelease – Payment details"
+			body = confirmationEmailBody(name, format, amount, cfg, host)
 		} else {
-			subject = "MTG Prerelease – You're on the waitlist"
+			subject = "Prerelease – You're on the waitlist"
 			body = fmt.Sprintf(`Hi %s,
 
 Thanks for signing up for %s.
@@ -355,6 +362,19 @@ func seatTotal(format string) string {
 		return "24 draft"
 	}
 	return "8 sealed"
+}
+
+func confirmationEmailBody(name, format string, amount int, cfg config, host string) string {
+	return fmt.Sprintf(`Hi %s,
+
+you are signed up for the prerelease - you will be playing %s!
+There are 3 options to pay your %d Euro:
+- Wero to %s: %s
+- IBAN: %s, recipient: %s, BIC: %s
+- bring cash to the event (paying in advance is appreciated though)
+If you can no longer attend, please cancel at %s/cancel.
+Looking forward to seeing you at the event!
+`, name, formatName(format), amount, cfg.weroEmail, cfg.weroLink, cfg.iban, cfg.ibanRecipient, cfg.bic, host)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -473,22 +493,13 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 				writeText(w, http.StatusInternalServerError, "server error")
 				return
 			}
-
 			if promoted {
 				amount := 15
 				if format == "sealed" {
 					amount = 30
 				}
-				subject := "MTG Prerelease – Payment details"
-				body := fmt.Sprintf(`Hi %s,
-
-Thanks for signing up for %s.
-Please send €%d via Wero to %s (IBAN: %s).
-Use "%s" as reference.
-We'll mark you paid once we receive the Wero notification.
-
-If you can no longer attend, cancel at %s/cancel using your email address.
-`, promotedName, formatName(format), amount, cfg.weroEmail, cfg.iban, promotedName, host)
+				subject := "Prerelease – Payment details"
+				body := confirmationEmailBody(promotedName, format, amount, cfg, host)
 				if err := mailer.Send(promotedEmail, subject, body); err != nil {
 					log.Printf("failed to send promotion email to %s: %v", promotedEmail, err)
 					failSubject := fmt.Sprintf("Failed to send payment mail to %s", promotedEmail)
