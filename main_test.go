@@ -49,7 +49,7 @@ func testDB(t *testing.T) *sql.DB {
 		email TEXT UNIQUE NOT NULL,
 		name TEXT NOT NULL,
 		format TEXT NOT NULL,
-		mailing_list INTEGER NOT NULL,
+		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
 		paid INTEGER NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'confirmed'
@@ -217,7 +217,6 @@ func TestSubmitValidationErrors(t *testing.T) {
 		{"missing format", func(v url.Values) { v.Del("format") }, "format"},
 		{"missing cancellation_ack", func(v url.Values) { v.Del("cancellation_ack") }, "cancellation"},
 		{"missing data_consent", func(v url.Values) { v.Del("data_consent") }, "consent"},
-		{"missing mailing_list", func(v url.Values) { v.Del("mailing_list") }, "mailing"},
 	}
 
 	for _, tc := range cases {

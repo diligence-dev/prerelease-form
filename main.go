@@ -126,7 +126,7 @@ func initSchema(db *sql.DB) error {
 		email TEXT UNIQUE NOT NULL,
 		name TEXT NOT NULL,
 		format TEXT NOT NULL,
-		mailing_list INTEGER NOT NULL,
+		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
 		paid INTEGER NOT NULL DEFAULT 0,
 		status TEXT NOT NULL DEFAULT 'confirmed'
@@ -245,9 +245,6 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			return
 		case dataConsent != "on":
 			writeText(w, http.StatusBadRequest, "Data consent required.")
-			return
-		case mailingList != "yes" && mailingList != "no":
-			writeText(w, http.StatusBadRequest, "Mailing list choice required.")
 			return
 		}
 
