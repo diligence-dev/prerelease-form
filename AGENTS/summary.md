@@ -16,6 +16,7 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - `index.html` — server-side template for the signup form, no JavaScript.
 - `thanks.html` — static thanks page.
 - `cancel.html` — static self-serve cancellation form.
+- All three HTML pages share a centered card layout (inline radio options, styled inputs/buttons); styling is inline per page, no shared CSS file.
 - `main_test.go` — table-driven tests with a fake `Mailer` and temp database.
 - `go.mod` / `go.sum` — Go module files.
 - `Dockerfile` — multi-stage scratch build.
