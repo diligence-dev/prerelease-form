@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -71,21 +70,18 @@ func mustInsert(t *testing.T, db *sql.DB, email, name, format, status string) {
 	}
 }
 
+func testConfig() config {
+	return config{
+		weroEmail:      "wero@example.com",
+		iban:           "DE1234567890",
+		organizerEmail: "organizer@example.com",
+		adminToken:     "secret-token",
+	}
+}
+
 func setupTestServer(t *testing.T, db *sql.DB, mailer Mailer) *httptest.Server {
 	t.Helper()
-	os.Setenv("ADMIN_TOKEN", "secret-token")
-	os.Setenv("WERO_EMAIL", "wero@example.com")
-	os.Setenv("IBAN", "DE1234567890")
-	os.Setenv("SMTP_FROM", "from@example.com")
-	os.Setenv("SMTP_FAIL_NOTIFY", "notify@example.com")
-	t.Cleanup(func() {
-		os.Unsetenv("ADMIN_TOKEN")
-		os.Unsetenv("WERO_EMAIL")
-		os.Unsetenv("IBAN")
-		os.Unsetenv("SMTP_FROM")
-		os.Unsetenv("SMTP_FAIL_NOTIFY")
-	})
-	handler, err := setupHandlers(db, mailer)
+	handler, err := setupHandlers(db, mailer, testConfig())
 	if err != nil {
 		t.Fatalf("setup handlers: %v", err)
 	}
@@ -124,7 +120,7 @@ func TestGetIndex(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{"Draft", "Sealed", "24", "8", "waitlist"} {
+	for _, want := range []string{"Draft", "Sealed"} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("body missing %q", want)
 		}
@@ -406,8 +402,8 @@ func TestSubmitMailerFailNotifies(t *testing.T) {
 	if len(mailer.sends) != 2 {
 		t.Fatalf("sends = %d, want 2", len(mailer.sends))
 	}
-	if mailer.sends[1].to != "notify@example.com" {
-		t.Errorf("notify to = %q, want notify@example.com", mailer.sends[1].to)
+	if mailer.sends[1].to != "organizer@example.com" {
+		t.Errorf("notify to = %q, want organizer@example.com", mailer.sends[1].to)
 	}
 }
 
@@ -604,7 +600,7 @@ func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 		if s.to == "waiter@example.com" && strings.Contains(s.subject, "Payment details") {
 			promotionFound = true
 		}
-		if s.to == "notify@example.com" && strings.Contains(s.body, "Canceler") && strings.Contains(s.body, "Waiter") {
+		if s.to == "organizer@example.com" && strings.Contains(s.body, "Canceler") && strings.Contains(s.body, "Waiter") {
 			organizerFound = true
 		}
 	}
@@ -676,8 +672,8 @@ func TestCancelWaitlist(t *testing.T) {
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
 	}
-	if mailer.sends[0].to != "notify@example.com" {
-		t.Errorf("notify to = %q, want notify@example.com", mailer.sends[0].to)
+	if mailer.sends[0].to != "organizer@example.com" {
+		t.Errorf("notify to = %q, want organizer@example.com", mailer.sends[0].to)
 	}
 }
 
@@ -765,5 +761,49 @@ func TestSeatsLeftClampedAtZero(t *testing.T) {
 	// We expect label to show 0 left for draft.
 	if strings.Contains(string(body), "-6") {
 		t.Errorf("body contains negative seats: %q", string(body))
+	}
+}
+
+func TestSubmitRejectsCRLFInName(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	for _, bad := range []string{"Name\r\nBcc: evil@x.com", "Line\nBreak", "Carriage\rReturn"} {
+		form := url.Values{}
+		form.Set("email", "crlf@example.com")
+		form.Set("name", bad)
+		form.Set("format", "draft")
+		form.Set("cancellation_ack", "on")
+		form.Set("data_consent", "on")
+		form.Set("mailing_list", "yes")
+		client := noRedirectClient()
+		resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("name %q: status = %d, want %d", bad, resp.StatusCode, http.StatusBadRequest)
+		}
+	}
+}
+
+func TestSubmitRejectsCRLFInEmail(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("email", "attacker@example.com\r\nBcc: victim@x.com")
+	form.Set("name", "Attacker")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
 }

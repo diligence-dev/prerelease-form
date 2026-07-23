@@ -26,14 +26,16 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 
 ## Endpoints
 - `GET /` — signup form with live seat counts.
-- `POST /submit` — validates input, inserts confirmed or waitlist row, sends email.
+- `POST /submit` — validates input (rejects CR/LF in email/name), inserts confirmed or waitlist row, sends email.
 - `GET /thanks` — static thanks page.
 - `GET /cancel` — static cancellation form.
-- `POST /cancel` — cancels by email, promotes oldest waitlister for the same format, emails promoted person and notifies organizer.
+- `POST /cancel` — cancels by email, promotes oldest waitlister for the same format, emails promoted person and notifies organizer (`ORGANIZER_EMAIL`).
 - `GET /submissions.csv?token=<ADMIN_TOKEN>` — CSV export (constant-time token check).
 - `GET /health` — returns "ok".
 
 ## Configuration
+All configuration is resolved once at startup into a `config` struct via `loadConfig()`; handlers receive `cfg` and never read `os.Getenv` per-request. Missing required values are fatal at startup.
+
 Required environment variables / Fly secrets:
 - `ADMIN_TOKEN` — protects `/submissions.csv`.
 - `SMTP_PASSWORD` — for `smtp.web.de` auth.
@@ -41,8 +43,8 @@ Required environment variables / Fly secrets:
 - `IBAN` — shown in payment emails.
 
 Optional:
+- `ORGANIZER_EMAIL` — recipient of cancellation/waitlist/delivery-failure notifications; defaults to `diligence.dev@web.de`.
 - `SMTP_FROM` — defaults to `diligence.bot@web.de`.
-- `SMTP_FAIL_NOTIFY` — defaults to `diligence.dev@web.de`.
 - `PORT` — defaults to `8080`.
 - `DATA_PATH` — defaults to `data.db`.
 

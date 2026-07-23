@@ -71,14 +71,16 @@ CREATE TABLE IF NOT EXISTS submissions (
 - Plain `<form method="POST" action="/cancel">` with one email field (required, type=email) and a submit button. Brief text: "Enter the email address you signed up with to cancel your registration or waitlist spot."
 
 ## Environment variables (Fly secrets)
-- `ADMIN_TOKEN` — required to access `/submissions.csv`
-- `WERO_EMAIL` — used in payment email body (e.g. magicdraftberlin@posteo.de or your personal Wero email)
-- `IBAN` — used in payment email body
-- `SMTP_PASSWORD` — required for SMTP auth to `smtp.web.de`
+- `ADMIN_TOKEN` — required to access `/submissions.csv`; validated at startup
+- `WERO_EMAIL` — used in payment email body (e.g. magicdraftberlin@posteo.de or your personal Wero email); validated at startup
+- `IBAN` — used in payment email body; validated at startup
+- `SMTP_PASSWORD` — required for SMTP auth to `smtp.web.de`; validated at startup
+- `ORGANIZER_EMAIL` — recipient of cancellation/waitlist/delivery-failure notifications; defaults to `diligence.dev@web.de`
 - `SMTP_FROM` — optional, defaults to `diligence.bot@web.de`
-- `SMTP_FAIL_NOTIFY` — optional, defaults to `diligence.dev@web.de`
 - `PORT` — set by Fly (defaults to 8080)
 - `DATA_PATH` — path to SQLite db (defaults to `data.db`)
+
+All configuration is resolved once at startup into a `config` struct via `loadConfig()`; handlers receive `cfg` and never read `os.Getenv` per-request. Missing required values are fatal at startup.
 
 Hardcoded SMTP settings (per spec): host `smtp.web.de`, port `587`, user `diligence.bot@web.de`, PLAIN auth over STARTTLS.
 
@@ -90,8 +92,8 @@ Serve embedded `index.html` (200, Content-Type: text/html).
 ### `POST /submit`
 1. Parse `application/x-www-form-urlencoded` body
 2. Validate:
-   - `email` non-empty and contains `@`
-   - `name` non-empty, max 200 chars
+   - `email` non-empty, contains `@`, and contains no CR/LF
+   - `name` non-empty, max 200 chars, and contains no CR/LF
    - `format` is exactly `draft` or `sealed`
    - `cancellation_ack` == `"on"` (mandatory checkbox)
    - `data_consent` == `"on"` (mandatory checkbox)
@@ -135,7 +137,7 @@ Serve embedded `index.html` (200, Content-Type: text/html).
    If you no longer wish to be on the waitlist, cancel at https://<host>/cancel using your email address.
    ```
    - On send success: redirect (302) to `/thanks`.
-   - On send failure: log the error, then send a failure-notification email to `<SMTP_FAIL_NOTIFY>` (default `diligence.dev@web.de`) with subject `Failed to send payment mail to <submitter email>` and body containing timestamp, submitter name, submitter email, format, amount (or "waitlist" when over cap), and the SMTP error message. Regardless of whether the failure-notification send succeeds or fails: redirect (302) to `/thanks`. The user always sees the thanks page.
+   - On send failure: log the error, then send a failure-notification email to `<ORGANIZER_EMAIL>` with subject `Failed to send payment mail to <submitter email>` and body containing timestamp, submitter name, submitter email, format, amount (or "waitlist" when over cap), and the SMTP error message. Regardless of whether the failure-notification send succeeds or fails: redirect (302) to `/thanks`. The user always sees the thanks page.
 
 ### `GET /thanks`
 Serve embedded `thanks.html` (200, Content-Type: text/html). Static, no dynamic content.
@@ -153,12 +155,12 @@ Serve embedded `cancel.html` (200, Content-Type: text/html). Static, no dynamic 
    - `UPDATE submissions SET status='cancelled' WHERE id=?`
    - `SELECT id,email,name FROM submissions WHERE format=? AND status='waitlist' ORDER BY created_at ASC LIMIT 1`
    - If found: `UPDATE submissions SET status='confirmed' WHERE id=?` (promoted person). Commit.
-   - If promoted: send the promotion (payment) email to the promoted person — identical body to the confirmed-signup payment email, with the promoted person's name/format/amount/Wero/IBAN and the cancel instructions. On failure → failure-notify to `<SMTP_FAIL_NOTIFY>`.
-   - Send organizer notification to `<SMTP_FAIL_NOTIFY>` (best-effort, regardless of whether a promotion happened). Body:
+   - If promoted: send the promotion (payment) email to the promoted person — identical body to the confirmed-signup payment email, with the promoted person's name/format/amount/Wero/IBAN and the cancel instructions. On failure → failure-notify to `<ORGANIZER_EMAIL>`.
+   - Send organizer notification to `<ORGANIZER_EMAIL>` (best-effort, regardless of whether a promotion happened). Body:
      - promotion happened: `<name> (<email>) cancelled their <format> spot. The seat went to <promoted name> (<promoted email>).`
      - no waitlist for that format: `<name> (<email>) cancelled their <format> spot. No one is on the waitlist for <format>.`
    - Respond 200 with plain text "Your registration has been cancelled."
-7. `status='waitlist'` — `UPDATE submissions SET status='cancelled'`, send organizer notification to `<SMTP_FAIL_NOTIFY>` (best-effort) with body `<name> (<email>) cancelled their <format> waitlist spot.`, respond 200 with plain text "Your waitlist spot has been cancelled."
+7. `status='waitlist'` — `UPDATE submissions SET status='cancelled'`, send organizer notification to `<ORGANIZER_EMAIL>` (best-effort) with body `<name> (<email>) cancelled their <format> waitlist spot.`, respond 200 with plain text "Your waitlist spot has been cancelled."
 
 ### `GET /submissions.csv?token=<ADMIN_TOKEN>`
 1. Compare `token` query param against `ADMIN_TOKEN` env var using `crypto/subtle.ConstantTimeCompare`
@@ -182,18 +184,17 @@ import (
     "encoding/csv"
     "fmt"
     "html/template"
+    "log"
     "net/http"
     "net/smtp"
     "os"
+    "strings"
     "time"
     _ "modernc.org/sqlite"
 )
 
 //go:embed index.html thanks.html cancel.html
-var indexHTML, thanksHTML, cancelHTML []byte
-
-var db *sql.DB
-var indexTmpl *template.Template
+var embeddedFiles embed.FS
 
 type Mailer interface {
     Send(to, subject, body string) error
@@ -207,17 +208,34 @@ func (m smtpMailer) Send(to, subject, body string) error {
     // net/smtp: dial, StartTLS, PlainAuth, Mail, Rcpt, Data
 }
 
+// config holds runtime configuration resolved once at startup; handlers
+// receive it and never read os.Getenv per-request.
+type config struct {
+    weroEmail, iban, organizerEmail, adminToken string
+}
+
+func loadConfig() config {
+    // read WERO_EMAIL, IBAN, ORGANIZER_EMAIL, ADMIN_TOKEN
+    // log.Fatalf on any missing required value
+}
+
 func main() {
+    cfg := loadConfig()
     // open db at env DATA_PATH or "data.db"
     // create schema if not exists
-    // parse index.html as template
-    // build smtpMailer from hardcoded host/user + env SMTP_PASSWORD, SMTP_FROM, SMTP_FAIL_NOTIFY
-    // register handlers: /, /submit, /thanks, /cancel, /submissions.csv, /health
+    // validate SMTP_PASSWORD at startup
+    // build smtpMailer from hardcoded host/user + env SMTP_PASSWORD, SMTP_FROM
+    // setupHandlers(db, mailer, cfg)
     // listen on env PORT or 8080
 }
 
 // handlers + helpers...
-// seatsLeft(db, format) (int, error): cap minus count of status='confirmed' for that format, clamped at 0.
+// setupHandlers(db, mailer, cfg) http.Handler: parses index.html once locally,
+//   wires handlers that close over db, mailer, cfg and the local template.
+//   No global indexTmpl.
+// seatsLeft(db, format, cap) (int, error): cap minus count of status='confirmed' for that format, clamped at 0.
+// writeText(w, status, msg): plain-text response helper (replaces http.Error for 2xx).
+// hasNewline(s) bool: rejects CR/LF in form fields to prevent SMTP/HTTP header injection.
 // cancelHandler: DB transaction for atomic cancel + promote oldest waitlister; send promotion and organizer emails.
 ```
 
@@ -268,7 +286,7 @@ Deploy steps (documented in plan.md but executed by implementer):
 ## Test-first workflow (per AGENTS/AGENTS.md)
 
 ### main_test.go — write first, must FAIL before implementation
-Table-driven tests using `httptest.NewServer` against the real `main()` handler wiring. Use a temp `data.db` via `t.TempDir()` for each test. A fake `Mailer` (implements `Mailer` interface) is injected via `setupHandlers(db, mailer) http.Handler` so tests record sends and simulate failures without hitting `smtp.web.de`.
+Table-driven tests using `httptest.NewServer` against the real `main()` handler wiring. Use a temp `data.db` via `t.TempDir()` for each test. A fake `Mailer` (implements `Mailer` interface) is injected via `setupHandlers(db, mailer, cfg) http.Handler` so tests record sends and simulate failures without hitting `smtp.web.de`. Tests build a `config` value directly (no env mutation).
 
 Tests:
 1. `GET /` returns 200 and body contains "Draft" and "Sealed", the initial seat numbers (`24`, `8`), and the waitlist note text
@@ -293,13 +311,15 @@ Tests:
 20. Same for sealed (8 confirmed → next is waitlist, body no `€30`/`IBAN`)
 21. After 3 confirmed draft submissions, `GET /` body shows `21` left for draft and `8` for sealed
 22. `GET /cancel` → 200, body contains an email input field and `action="/cancel"`
-23. `POST /cancel` with email of a confirmed row that has one waitlist row for same format → 200; canceller `status='cancelled'`; oldest waitlist `status='confirmed'`; payment (promotion) email recorded to promoted person; organizer notification recorded to `SMTP_FAIL_NOTIFY` containing both names
+23. `POST /cancel` with email of a confirmed row that has one waitlist row for same format → 200; canceller `status='cancelled'`; oldest waitlist `status='confirmed'`; payment (promotion) email recorded to promoted person; organizer notification recorded to `ORGANIZER_EMAIL` containing both names
 24. `POST /cancel` with email of a confirmed row, no waitlist for that format → canceller cancelled; organizer notification body says `No one is on the waitlist`; no promotion email sent
 25. `POST /cancel` with email of a waitlist row → `status='cancelled'`; no promotion email; organizer notification recorded
 26. `POST /cancel` with email not in DB → 200 `No registration found`
 27. `POST /cancel` with email of an already-cancelled row → 200 `already cancelled`
+28. `POST /submit` with `name` containing CR or LF → 400
+29. `POST /submit` with `email` containing CR or LF → 400
 
-Tests must run against a refactored `main()` that exposes a `setupHandlers(db, mailer) http.Handler` function so tests wire a temp DB and fake Mailer without touching global state.
+Tests must run against a refactored `main()` that exposes a `setupHandlers(db, mailer, cfg) http.Handler` function so tests wire a temp DB, fake Mailer, and config without touching global state.
 
 ### Run tests (expected: fail)
 ```
@@ -332,11 +352,12 @@ go test ./...
 2. No admin UI — CSV download is the only review surface.
 3. `paid` is a column in the DB and CSV but never written by the app; organizer edits CSV in spreadsheet tool after download.
 4. No rate limiting / CSRF protection — single event, small audience, low risk. Acceptable trade-off for simplicity.
-5. Two signup-time emails: payment for `confirmed`, waitlist for over-cap. On cancellation, the app also sends a promotion (payment) email to the promoted waitlister and an organizer-notification email to `SMTP_FAIL_NOTIFY` (default `diligence.dev@web.de`). No other participant-facing emails.
+5. Two signup-time emails: payment for `confirmed`, waitlist for over-cap. On cancellation, the app also sends a promotion (payment) email to the promoted waitlister, an organizer-notification email to `ORGANIZER_EMAIL`, and on mail-send failure a failure-notification email to `ORGANIZER_EMAIL`.
 6. No JavaScript — form is plain HTML, thanks and cancel pages are static.
 7. `net/smtp` PLAIN auth over STARTTLS to `smtp.web.de:587` (stdlib, no new external dependency).
-8. Email send is best-effort from the user's perspective: on failure the user still sees the thanks page; a failure-notification email goes to `diligence.dev@web.de` (or `SMTP_FAIL_NOTIFY`).
+8. Email send is best-effort from the user's perspective: on failure the user still sees the thanks page; a failure-notification email goes to `ORGANIZER_EMAIL`.
 9. SMTP password lives in the `SMTP_PASSWORD` Fly secret, never in the repo.
 10. Caps: 24 draft / 8 sealed; over-cap signups become `waitlist`. Live seat counts shown on the form via `html/template`.
-11. Cancellation is self-serve via `GET /cancel` (form) + `POST /cancel` (email). Submitting the form atomically cancels the row and promotes the oldest `waitlist` row for the same format, emailing the promoted person payment details and notifying the organizer at `SMTP_FAIL_NOTIFY`. No per-row token: the row is identified by the submitted email.
+11. Cancellation is self-serve via `GET /cancel` (form) + `POST /cancel` (email). Submitting the form atomically cancels the row and promotes the oldest `waitlist` row for the same format, emailing the promoted person payment details and notifying the organizer at `ORGANIZER_EMAIL`. No per-row token: the row is identified by the submitted email.
 12. Trade-off: anyone who knows a registrant's email can cancel their spot via `/cancel`. Accepted under assumption 4 (single event, small audience, low risk) in exchange for simplicity (no token column, no email round-trip to confirm intent).
+13. Form fields `email` and `name` are rejected if they contain CR/LF to prevent SMTP/HTTP header injection via `net/smtp` (which does not sanitize).

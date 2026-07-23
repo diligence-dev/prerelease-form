@@ -25,8 +25,6 @@ const (
 //go:embed index.html thanks.html cancel.html
 var embeddedFiles embed.FS
 
-var indexTmpl *template.Template
-
 type Mailer interface {
 	Send(to, subject, body string) error
 }
@@ -45,7 +43,43 @@ func (m smtpMailer) Send(to, subject, body string) error {
 	return smtp.SendMail(addr, auth, m.from, []string{to}, msg)
 }
 
+// config holds runtime configuration resolved once at startup so handlers
+// never read os.Getenv directly and required values are validated up front.
+type config struct {
+	weroEmail      string
+	iban           string
+	organizerEmail string
+	adminToken     string
+}
+
+// loadConfig reads configuration from the environment and validates required
+// values. Missing required values are fatal at startup so the server never
+// boots into a state where payment/organizer emails would silently be empty.
+func loadConfig() config {
+	cfg := config{
+		weroEmail:      os.Getenv("WERO_EMAIL"),
+		iban:           os.Getenv("IBAN"),
+		organizerEmail: getenv("ORGANIZER_EMAIL", "diligence.dev@web.de"),
+		adminToken:     os.Getenv("ADMIN_TOKEN"),
+	}
+	if cfg.weroEmail == "" {
+		log.Fatalf("WERO_EMAIL not set")
+	}
+	if cfg.iban == "" {
+		log.Fatalf("IBAN not set")
+	}
+	if cfg.organizerEmail == "" {
+		log.Fatalf("ORGANIZER_EMAIL not set")
+	}
+	if cfg.adminToken == "" {
+		log.Fatalf("ADMIN_TOKEN not set")
+	}
+	return cfg
+}
+
 func main() {
+	cfg := loadConfig()
+
 	dataPath := getenv("DATA_PATH", "data.db")
 	db, err := sql.Open("sqlite", dataPath)
 	if err != nil {
@@ -56,26 +90,19 @@ func main() {
 		log.Fatalf("init schema: %v", err)
 	}
 
-	tmpl, err := template.ParseFS(embeddedFiles, "index.html")
-	if err != nil {
-		log.Fatalf("parse template: %v", err)
-	}
-	indexTmpl = tmpl
-
 	password := os.Getenv("SMTP_PASSWORD")
 	if password == "" {
 		log.Fatalf("SMTP_PASSWORD not set")
 	}
-	from := getenv("SMTP_FROM", "diligence.bot@web.de")
 	mailer := smtpMailer{
 		host:     "smtp.web.de",
 		port:     "587",
 		user:     "diligence.bot@web.de",
 		password: password,
-		from:     from,
+		from:     getenv("SMTP_FROM", "diligence.bot@web.de"),
 	}
 
-	handler, err := setupHandlers(db, mailer)
+	handler, err := setupHandlers(db, mailer, cfg)
 	if err != nil {
 		log.Fatalf("setup handlers: %v", err)
 	}
@@ -107,20 +134,19 @@ func initSchema(db *sql.DB) error {
 	return err
 }
 
-func setupHandlers(db *sql.DB, mailer Mailer) (http.Handler, error) {
+func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) {
 	tmpl, err := template.ParseFS(embeddedFiles, "index.html")
 	if err != nil {
 		return nil, err
 	}
-	indexTmpl = tmpl
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", indexHandler(db))
-	mux.HandleFunc("POST /submit", submitHandler(db, mailer))
+	mux.HandleFunc("GET /{$}", indexHandler(db, tmpl))
+	mux.HandleFunc("POST /submit", submitHandler(db, mailer, cfg))
 	mux.HandleFunc("GET /thanks", staticHandler("thanks.html"))
 	mux.HandleFunc("GET /cancel", staticHandler("cancel.html"))
-	mux.HandleFunc("POST /cancel", cancelHandler(db, mailer))
-	mux.HandleFunc("GET /submissions.csv", csvHandler(db))
+	mux.HandleFunc("POST /cancel", cancelHandler(db, mailer, cfg))
+	mux.HandleFunc("GET /submissions.csv", csvHandler(db, cfg))
 	mux.HandleFunc("GET /health", healthHandler)
 	return mux, nil
 }
@@ -130,20 +156,22 @@ type seatCounts struct {
 	SealedSeatsLeft int
 }
 
-func indexHandler(db *sql.DB) http.HandlerFunc {
+func indexHandler(db *sql.DB, tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		draftLeft, err := seatsLeft(db, "draft", draftCap)
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 		sealedLeft, err := seatsLeft(db, "sealed", sealedCap)
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		indexTmpl.Execute(w, seatCounts{DraftSeatsLeft: draftLeft, SealedSeatsLeft: sealedLeft})
+		if err := tmpl.Execute(w, seatCounts{DraftSeatsLeft: draftLeft, SealedSeatsLeft: sealedLeft}); err != nil {
+			log.Printf("index template execute: %v", err)
+		}
 	}
 }
 
@@ -164,7 +192,7 @@ func staticHandler(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		data, err := embeddedFiles.ReadFile(name)
 		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
+			writeText(w, http.StatusNotFound, "not found")
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -172,10 +200,26 @@ func staticHandler(name string) http.HandlerFunc {
 	}
 }
 
-func submitHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
+// writeText writes a plain-text response with the given status code, replacing
+// the http.Error-based pattern so 2xx responses are no longer sent via an
+// error helper.
+func writeText(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	fmt.Fprint(w, msg)
+}
+
+// hasNewline reports whether s contains a carriage return or newline. Used to
+// reject form fields that could otherwise inject SMTP/HTTP headers.
+func hasNewline(s string) bool {
+	return strings.ContainsAny(s, "\r\n")
+}
+
+func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid form", http.StatusBadRequest)
+			writeText(w, http.StatusBadRequest, "invalid form")
 			return
 		}
 
@@ -187,23 +231,23 @@ func submitHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
 		mailingList := r.FormValue("mailing_list")
 
 		switch {
-		case email == "" || !strings.Contains(email, "@"):
-			http.Error(w, "Invalid email.", http.StatusBadRequest)
+		case email == "" || !strings.Contains(email, "@") || hasNewline(email):
+			writeText(w, http.StatusBadRequest, "Invalid email.")
 			return
-		case name == "" || len(name) > 200:
-			http.Error(w, "Invalid name.", http.StatusBadRequest)
+		case name == "" || len(name) > 200 || hasNewline(name):
+			writeText(w, http.StatusBadRequest, "Invalid name.")
 			return
 		case format != "draft" && format != "sealed":
-			http.Error(w, "Invalid format.", http.StatusBadRequest)
+			writeText(w, http.StatusBadRequest, "Invalid format.")
 			return
 		case cancellationAck != "on":
-			http.Error(w, "Cancellation acknowledgement required.", http.StatusBadRequest)
+			writeText(w, http.StatusBadRequest, "Cancellation acknowledgement required.")
 			return
 		case dataConsent != "on":
-			http.Error(w, "Data consent required.", http.StatusBadRequest)
+			writeText(w, http.StatusBadRequest, "Data consent required.")
 			return
 		case mailingList != "yes" && mailingList != "no":
-			http.Error(w, "Mailing list choice required.", http.StatusBadRequest)
+			writeText(w, http.StatusBadRequest, "Mailing list choice required.")
 			return
 		}
 
@@ -221,7 +265,7 @@ func submitHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
 
 		tx, err := db.Begin()
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 		defer tx.Rollback()
@@ -229,7 +273,7 @@ func submitHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
 		var confirmedCount int
 		err = tx.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND status='confirmed'", format).Scan(&confirmedCount)
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 
@@ -245,22 +289,19 @@ func submitHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
-				http.Error(w, "You have already registered with this email.", http.StatusConflict)
+				writeText(w, http.StatusConflict, "You have already registered with this email.")
 				return
 			}
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 
-		weroEmail := os.Getenv("WERO_EMAIL")
-		iban := os.Getenv("IBAN")
 		host := "https://" + r.Host
-		failNotify := getenv("SMTP_FAIL_NOTIFY", "diligence.dev@web.de")
 
 		var subject, body string
 		if status == "confirmed" {
@@ -273,7 +314,7 @@ Use "%s" as reference.
 We'll mark you paid once we receive the Wero notification.
 
 If you can no longer attend, cancel at %s/cancel using your email address.
-`, name, formatName(format), amount, weroEmail, iban, name, host)
+`, name, formatName(format), amount, cfg.weroEmail, cfg.iban, name, host)
 		} else {
 			subject = "MTG Prerelease – You're on the waitlist"
 			body = fmt.Sprintf(`Hi %s,
@@ -295,7 +336,7 @@ If you no longer wish to be on the waitlist, cancel at %s/cancel using your emai
 			failSubject := fmt.Sprintf("Failed to send payment mail to %s", email)
 			failBody := fmt.Sprintf("Timestamp: %s\nName: %s\nEmail: %s\nFormat: %s\nAmount: %s\nError: %v",
 				time.Now().UTC().Format(time.RFC3339), name, email, format, amountLabel, err)
-			if notifyErr := mailer.Send(failNotify, failSubject, failBody); notifyErr != nil {
+			if notifyErr := mailer.Send(cfg.organizerEmail, failSubject, failBody); notifyErr != nil {
 				log.Printf("failed to send failure notification: %v", notifyErr)
 			}
 		}
@@ -322,22 +363,17 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
-func csvHandler(db *sql.DB) http.HandlerFunc {
+func csvHandler(db *sql.DB, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")
-		adminToken := os.Getenv("ADMIN_TOKEN")
-		if adminToken == "" {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(token), []byte(adminToken)) != 1 {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.adminToken)) != 1 {
+			writeText(w, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 
 		rows, err := db.Query("SELECT id, email, name, format, mailing_list, created_at, paid, status FROM submissions ORDER BY created_at DESC")
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 		defer rows.Close()
@@ -345,14 +381,18 @@ func csvHandler(db *sql.DB) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=\"submissions.csv\"")
 		writer := csv.NewWriter(w)
-		writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "paid", "status"})
+		if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "paid", "status"}); err != nil {
+			log.Printf("csv write header: %v", err)
+			return
+		}
 		for rows.Next() {
 			var id, mailingList, paid int
 			var email, name, format, createdAt, status string
 			if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &paid, &status); err != nil {
+				log.Printf("csv scan row: %v", err)
 				return
 			}
-			writer.Write([]string{
+			if err := writer.Write([]string{
 				fmt.Sprintf("%d", id),
 				email,
 				name,
@@ -361,22 +401,28 @@ func csvHandler(db *sql.DB) http.HandlerFunc {
 				createdAt,
 				fmt.Sprintf("%d", paid),
 				status,
-			})
+			}); err != nil {
+				log.Printf("csv write row: %v", err)
+				return
+			}
 		}
 		writer.Flush()
+		if err := writer.Error(); err != nil {
+			log.Printf("csv flush: %v", err)
+		}
 	}
 }
 
-func cancelHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
+func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
-			http.Error(w, "invalid form", http.StatusBadRequest)
+			writeText(w, http.StatusBadRequest, "invalid form")
 			return
 		}
 
 		email := strings.TrimSpace(r.FormValue("email"))
-		if email == "" || !strings.Contains(email, "@") {
-			http.Error(w, "Invalid email.", http.StatusBadRequest)
+		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
+			writeText(w, http.StatusBadRequest, "Invalid email.")
 			return
 		}
 
@@ -384,35 +430,32 @@ func cancelHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
 		var name, format, status string
 		err := db.QueryRow("SELECT id, name, format, status FROM submissions WHERE email=?", email).Scan(&id, &name, &format, &status)
 		if err == sql.ErrNoRows {
-			http.Error(w, "No registration found for that email.", http.StatusOK)
+			writeText(w, http.StatusOK, "No registration found for that email.")
 			return
 		}
 		if err != nil {
-			http.Error(w, "server error", http.StatusInternalServerError)
+			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 
 		if status == "cancelled" {
-			http.Error(w, "Your registration was already cancelled.", http.StatusOK)
+			writeText(w, http.StatusOK, "Your registration was already cancelled.")
 			return
 		}
 
-		failNotify := getenv("SMTP_FAIL_NOTIFY", "diligence.dev@web.de")
 		host := "https://" + r.Host
-		weroEmail := os.Getenv("WERO_EMAIL")
-		iban := os.Getenv("IBAN")
 
 		if status == "confirmed" {
 			tx, err := db.Begin()
 			if err != nil {
-				http.Error(w, "server error", http.StatusInternalServerError)
+				writeText(w, http.StatusInternalServerError, "server error")
 				return
 			}
 			defer tx.Rollback()
 
 			_, err = tx.Exec("UPDATE submissions SET status='cancelled' WHERE id=?", id)
 			if err != nil {
-				http.Error(w, "server error", http.StatusInternalServerError)
+				writeText(w, http.StatusInternalServerError, "server error")
 				return
 			}
 
@@ -423,13 +466,13 @@ func cancelHandler(db *sql.DB, mailer Mailer) http.HandlerFunc {
 			if promoted {
 				_, err = tx.Exec("UPDATE submissions SET status='confirmed' WHERE id=?", promotedID)
 				if err != nil {
-					http.Error(w, "server error", http.StatusInternalServerError)
+					writeText(w, http.StatusInternalServerError, "server error")
 					return
 				}
 			}
 
 			if err := tx.Commit(); err != nil {
-				http.Error(w, "server error", http.StatusInternalServerError)
+				writeText(w, http.StatusInternalServerError, "server error")
 				return
 			}
 
@@ -447,51 +490,50 @@ Use "%s" as reference.
 We'll mark you paid once we receive the Wero notification.
 
 If you can no longer attend, cancel at %s/cancel using your email address.
-`, promotedName, formatName(format), amount, weroEmail, iban, promotedName, host)
+`, promotedName, formatName(format), amount, cfg.weroEmail, cfg.iban, promotedName, host)
 				if err := mailer.Send(promotedEmail, subject, body); err != nil {
 					log.Printf("failed to send promotion email to %s: %v", promotedEmail, err)
 					failSubject := fmt.Sprintf("Failed to send payment mail to %s", promotedEmail)
 					failBody := fmt.Sprintf("Timestamp: %s\nName: %s\nEmail: %s\nFormat: %s\nAmount: €%d\nError: %v",
 						time.Now().UTC().Format(time.RFC3339), promotedName, promotedEmail, format, amount, err)
-					if notifyErr := mailer.Send(failNotify, failSubject, failBody); notifyErr != nil {
+					if notifyErr := mailer.Send(cfg.organizerEmail, failSubject, failBody); notifyErr != nil {
 						log.Printf("failed to send failure notification: %v", notifyErr)
 					}
 				}
 			}
 
-			var notifySubject, notifyBody string
+			notifySubject := fmt.Sprintf("Cancelled: %s", email)
+			var notifyBody string
 			if promoted {
-				notifySubject = fmt.Sprintf("Cancelled: %s", email)
 				notifyBody = fmt.Sprintf("%s (%s) cancelled their %s spot. The seat went to %s (%s).", name, email, format, promotedName, promotedEmail)
 			} else {
-				notifySubject = fmt.Sprintf("Cancelled: %s", email)
 				notifyBody = fmt.Sprintf("%s (%s) cancelled their %s spot. No one is on the waitlist for %s.", name, email, format, format)
 			}
-			if err := mailer.Send(failNotify, notifySubject, notifyBody); err != nil {
+			if err := mailer.Send(cfg.organizerEmail, notifySubject, notifyBody); err != nil {
 				log.Printf("failed to send organizer notification: %v", err)
 			}
 
-			http.Error(w, "Your registration has been cancelled.", http.StatusOK)
+			writeText(w, http.StatusOK, "Your registration has been cancelled.")
 			return
 		}
 
 		if status == "waitlist" {
 			_, err := db.Exec("UPDATE submissions SET status='cancelled' WHERE id=?", id)
 			if err != nil {
-				http.Error(w, "server error", http.StatusInternalServerError)
+				writeText(w, http.StatusInternalServerError, "server error")
 				return
 			}
 
 			subject := fmt.Sprintf("Cancelled waitlist: %s", email)
 			body := fmt.Sprintf("%s (%s) cancelled their %s waitlist spot.", name, email, format)
-			if err := mailer.Send(failNotify, subject, body); err != nil {
+			if err := mailer.Send(cfg.organizerEmail, subject, body); err != nil {
 				log.Printf("failed to send organizer notification: %v", err)
 			}
 
-			http.Error(w, "Your waitlist spot has been cancelled.", http.StatusOK)
+			writeText(w, http.StatusOK, "Your waitlist spot has been cancelled.")
 			return
 		}
 
-		http.Error(w, "server error", http.StatusInternalServerError)
+		writeText(w, http.StatusInternalServerError, "server error")
 	}
 }
