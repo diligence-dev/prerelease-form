@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Pay for your spot</title>
+	<style>
+		body {
+			font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+			line-height: 1.6;
+			margin: 0;
+			padding: 2rem 1rem;
+			color: #222;
+			background: #f5f6f8;
+			display: flex;
+			justify-content: center;
+		}
+		.card {
+			max-width: 40rem;
+			width: 100%;
+			background: #fff;
+			padding: 2rem;
+			border-radius: 0.75rem;
+			box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+			box-sizing: border-box;
+		}
+		h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
+		.note { color: #555; margin: 0 0 1.5rem; }
+		details { margin-top: 1rem; border: 1px solid #ddd; border-radius: 0.375rem; }
+		summary {
+			padding: 0.75rem 1rem;
+			cursor: pointer;
+			font-weight: 600;
+			background: #f9fafb;
+		}
+		summary:hover { background: #f0f0f0; }
+		details[open] summary { border-bottom: 1px solid #ddd; }
+		.content { padding: 1rem; }
+		.qr { max-width: 200px; height: auto; display: block; margin: 1rem 0; }
+		.method-info { margin: 0.5rem 0; }
+		button {
+			margin-top: 1rem;
+			padding: 0.75rem 1.25rem;
+			font-size: 1rem;
+			cursor: pointer;
+			border: none;
+			border-radius: 0.375rem;
+			background: #2563eb;
+			color: #fff;
+		}
+		button:hover { background: #1d4ed8; }
+	</style>
+</head>
+<body>
+	<div class="card">
+		{{if eq .Payment "unknown"}}
+		<h1>Pay for your {{.Format}} spot</h1>
+		<p class="note">Amount due: €{{.Amount}}</p>
+
+		<details>
+			<summary>Pay via Wero</summary>
+			<div class="content">
+				{{.WeroQR}}
+				<p class="method-info">Or pay via Wero link: <a href="{{.WeroLink}}">{{.WeroLink}}</a></p>
+				<p class="method-info">Or send €{{.Amount}} to: {{.WeroEmail}}</p>
+				<form method="POST" action="/pay">
+					<input type="hidden" name="email" value="{{.Email}}">
+					<input type="hidden" name="method" value="wero">
+					<button type="submit">Done, I've paid</button>
+				</form>
+			</div>
+		</details>
+
+		<details>
+			<summary>Pay via IBAN</summary>
+			<div class="content">
+				{{.EpcQR}}
+				<p class="method-info">Recipient: {{.IBANRecipient}}</p>
+				<p class="method-info">IBAN: {{.IBAN}}</p>
+				<p class="method-info">BIC: {{.BIC}}</p>
+				<p class="method-info">Amount: €{{.Amount}}</p>
+				<p class="method-info">Reference: {{.Reference}}</p>
+				<form method="POST" action="/pay">
+					<input type="hidden" name="email" value="{{.Email}}">
+					<input type="hidden" name="method" value="iban">
+					<button type="submit">Done, I've paid</button>
+				</form>
+			</div>
+		</details>
+
+		<details>
+			<summary>Pay Cash at the event</summary>
+			<div class="content">
+				<p class="method-info">You can pay in cash when you arrive at the event.</p>
+				<form method="POST" action="/pay">
+					<input type="hidden" name="email" value="{{.Email}}">
+					<input type="hidden" name="method" value="cash">
+					<button type="submit">I'll pay cash at the event</button>
+				</form>
+			</div>
+		</details>
+		{{else}}
+		<h1>Thanks!</h1>
+		{{if eq .Payment "paid"}}<p>We've recorded your payment.</p>{{end}}
+		{{if eq .Payment "cash"}}<p>We've recorded that you'll pay cash at the event.</p>{{end}}
+		{{end}}
+	</div>
+</body>
+</html>

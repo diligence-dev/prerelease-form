@@ -10,10 +10,12 @@ import (
 	"log"
 	"net/http"
 	"net/smtp"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	qrcode "github.com/yeqown/go-qrcode/v2"
 	_ "modernc.org/sqlite"
 )
 
@@ -22,7 +24,7 @@ const (
 	sealedCap = 8
 )
 
-//go:embed index.html thanks.html cancel.html
+//go:embed index.html pay.html waitlist.html cancel.html
 var embeddedFiles embed.FS
 
 type Mailer interface {
@@ -144,22 +146,28 @@ func initSchema(db *sql.DB) error {
 		format TEXT NOT NULL,
 		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
-		paid INTEGER NOT NULL DEFAULT 0,
+		payment TEXT NOT NULL DEFAULT 'unknown',
 		status TEXT NOT NULL DEFAULT 'confirmed'
 	)`)
 	return err
 }
 
 func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) {
-	tmpl, err := template.ParseFS(embeddedFiles, "index.html")
+	indexTmpl, err := template.ParseFS(embeddedFiles, "index.html")
+	if err != nil {
+		return nil, err
+	}
+	payTmpl, err := template.ParseFS(embeddedFiles, "pay.html")
 	if err != nil {
 		return nil, err
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", indexHandler(db, tmpl))
+	mux.HandleFunc("GET /{$}", indexHandler(db, indexTmpl))
 	mux.HandleFunc("POST /submit", submitHandler(db, mailer, cfg))
-	mux.HandleFunc("GET /thanks", staticHandler("thanks.html"))
+	mux.HandleFunc("GET /pay", payHandler(db, payTmpl, cfg))
+	mux.HandleFunc("POST /pay", postPayHandler(db, cfg))
+	mux.HandleFunc("GET /waitlist", staticHandler("waitlist.html"))
 	mux.HandleFunc("GET /cancel", staticHandler("cancel.html"))
 	mux.HandleFunc("POST /cancel", cancelHandler(db, mailer, cfg))
 	mux.HandleFunc("GET /submissions.csv", csvHandler(db, cfg))
@@ -318,8 +326,8 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		var subject, body string
 		if status == "confirmed" {
-			subject = "Prerelease – Payment details"
-			body = confirmationEmailBody(name, format, amount, cfg, host)
+			subject = "Prerelease – You're signed up"
+			body = confirmationEmailBody(name, format, email, host)
 		} else {
 			subject = "Prerelease – You're on the waitlist"
 			body = fmt.Sprintf(`Hi %s,
@@ -346,7 +354,11 @@ If you no longer wish to be on the waitlist, cancel at %s/cancel using your emai
 			}
 		}
 
-		http.Redirect(w, r, "/thanks", http.StatusFound)
+		if status == "confirmed" {
+			http.Redirect(w, r, "/pay?email="+url.QueryEscape(email), http.StatusFound)
+		} else {
+			http.Redirect(w, r, "/waitlist", http.StatusFound)
+		}
 	}
 }
 
@@ -364,17 +376,14 @@ func seatTotal(format string) string {
 	return "8 sealed"
 }
 
-func confirmationEmailBody(name, format string, amount int, cfg config, host string) string {
+func confirmationEmailBody(name, format, email, host string) string {
 	return fmt.Sprintf(`Hi %s,
 
 you are signed up for the prerelease - you will be playing %s!
-There are 3 options to pay your %d Euro:
-- Wero to %s: %s
-- IBAN: %s, recipient: %s, BIC: %s
-- bring cash to the event (paying in advance is appreciated though)
-If you can no longer attend, please cancel at %s/cancel.
+Pay for your spot here: %s/pay?email=%s
+If you can no longer attend, cancel at %s/cancel.
 Looking forward to seeing you at the event!
-`, name, formatName(format), amount, cfg.weroEmail, cfg.weroLink, cfg.iban, cfg.ibanRecipient, cfg.bic, host)
+`, name, formatName(format), host, url.QueryEscape(email), host)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -389,7 +398,7 @@ func csvHandler(db *sql.DB, cfg config) http.HandlerFunc {
 			return
 		}
 
-		rows, err := db.Query("SELECT id, email, name, format, mailing_list, created_at, paid, status FROM submissions ORDER BY created_at DESC")
+		rows, err := db.Query("SELECT id, email, name, format, mailing_list, created_at, payment, status FROM submissions ORDER BY created_at DESC")
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
@@ -399,14 +408,14 @@ func csvHandler(db *sql.DB, cfg config) http.HandlerFunc {
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=\"submissions.csv\"")
 		writer := csv.NewWriter(w)
-		if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "paid", "status"}); err != nil {
+		if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status"}); err != nil {
 			log.Printf("csv write header: %v", err)
 			return
 		}
 		for rows.Next() {
-			var id, mailingList, paid int
-			var email, name, format, createdAt, status string
-			if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &paid, &status); err != nil {
+			var id, mailingList int
+			var email, name, format, createdAt, payment, status string
+			if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status); err != nil {
 				log.Printf("csv scan row: %v", err)
 				return
 			}
@@ -417,7 +426,7 @@ func csvHandler(db *sql.DB, cfg config) http.HandlerFunc {
 				format,
 				fmt.Sprintf("%d", mailingList),
 				createdAt,
-				fmt.Sprintf("%d", paid),
+				payment,
 				status,
 			}); err != nil {
 				log.Printf("csv write row: %v", err)
@@ -493,13 +502,14 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 				writeText(w, http.StatusInternalServerError, "server error")
 				return
 			}
+			amount := 15
+			if format == "sealed" {
+				amount = 30
+			}
+
 			if promoted {
-				amount := 15
-				if format == "sealed" {
-					amount = 30
-				}
-				subject := "Prerelease – Payment details"
-				body := confirmationEmailBody(promotedName, format, amount, cfg, host)
+				subject := "Prerelease – You're signed up"
+				body := confirmationEmailBody(promotedName, format, promotedEmail, host)
 				if err := mailer.Send(promotedEmail, subject, body); err != nil {
 					log.Printf("failed to send promotion email to %s: %v", promotedEmail, err)
 					failSubject := fmt.Sprintf("Failed to send payment mail to %s", promotedEmail)
@@ -545,4 +555,179 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		writeText(w, http.StatusInternalServerError, "server error")
 	}
+}
+
+type payPageData struct {
+	Email         string
+	Format        string
+	Amount        int
+	WeroEmail     string
+	WeroLink      string
+	WeroQR        template.HTML
+	IBAN          string
+	IBANRecipient string
+	BIC           string
+	Reference     int
+	EpcQR         template.HTML
+	Payment       string
+}
+
+func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		email := strings.TrimSpace(r.URL.Query().Get("email"))
+		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
+			writeText(w, http.StatusOK, "not available")
+			return
+		}
+
+		var id int
+		var format, payment, status string
+		err := db.QueryRow("SELECT id, format, payment, status FROM submissions WHERE email=?", email).Scan(&id, &format, &payment, &status)
+		if err == sql.ErrNoRows {
+			writeText(w, http.StatusOK, "not available")
+			return
+		}
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+
+		if status != "confirmed" {
+			writeText(w, http.StatusOK, "not available")
+			return
+		}
+
+		amount := 15
+		if format == "sealed" {
+			amount = 30
+		}
+
+		epcPayloadText := epcPayload(cfg.bic, cfg.ibanRecipient, cfg.iban, amount, id)
+		epcQR, err := qrSVG(epcPayloadText, 8)
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+		weroQR, err := qrSVG(cfg.weroLink, 8)
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+
+		data := payPageData{
+			Email:         email,
+			Format:        formatName(format),
+			Amount:        amount,
+			WeroEmail:     cfg.weroEmail,
+			WeroLink:      cfg.weroLink,
+			WeroQR:        weroQR,
+			IBAN:          cfg.iban,
+			IBANRecipient: cfg.ibanRecipient,
+			BIC:           cfg.bic,
+			Reference:     id,
+			EpcQR:         epcQR,
+			Payment:       payment,
+		}
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, data); err != nil {
+			log.Printf("pay template execute: %v", err)
+		}
+	}
+}
+
+func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			writeText(w, http.StatusBadRequest, "invalid form")
+			return
+		}
+
+		email := strings.TrimSpace(r.FormValue("email"))
+		method := r.FormValue("method")
+
+		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
+			writeText(w, http.StatusBadRequest, "Invalid email.")
+			return
+		}
+
+		if method != "wero" && method != "iban" && method != "cash" {
+			writeText(w, http.StatusBadRequest, "Invalid method.")
+			return
+		}
+
+		var id int
+		var payment, status string
+		err := db.QueryRow("SELECT id, payment, status FROM submissions WHERE email=?", email).Scan(&id, &payment, &status)
+		if err == sql.ErrNoRows {
+			writeText(w, http.StatusOK, "not available")
+			return
+		}
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+
+		if status != "confirmed" {
+			writeText(w, http.StatusOK, "not available")
+			return
+		}
+
+		if payment != "unknown" {
+			http.Redirect(w, r, "/pay?email="+url.QueryEscape(email), http.StatusFound)
+			return
+		}
+
+		newPayment := "paid"
+		if method == "cash" {
+			newPayment = "cash"
+		}
+
+		_, err = db.Exec("UPDATE submissions SET payment=? WHERE id=?", newPayment, id)
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+
+		http.Redirect(w, r, "/pay?email="+url.QueryEscape(email), http.StatusFound)
+	}
+}
+
+func epcPayload(bic, recipient, iban string, amount int, reference int) string {
+	amt := strings.Replace(fmt.Sprintf("%.2f", float64(amount)), ".", ",", 1)
+	return fmt.Sprintf("BCD\r\n001\r\n1\r\nSCT\r\n%s\r\n%s\r\n%s\r\nEUR%s\r\n\r\n\r\n%d\r\n\r\n",
+		bic, recipient, iban, amt, reference)
+}
+
+type svgWriter struct {
+	b     strings.Builder
+	scale int
+}
+
+func (w *svgWriter) Write(mat qrcode.Matrix) error {
+	dim := mat.Width()
+	size := dim * w.scale
+	fmt.Fprintf(&w.b, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" shape-rendering="crispEdges">`, size, size, size, size)
+	fmt.Fprintf(&w.b, `<rect width="%d" height="%d" fill="#fff"/>`, size, size)
+	mat.Iterate(qrcode.IterDirection_COLUMN, func(x, y int, s qrcode.QRValue) {
+		if s.IsSet() {
+			fmt.Fprintf(&w.b, `<rect x="%d" y="%d" width="%d" height="%d" fill="#000"/>`, x*w.scale, y*w.scale, w.scale, w.scale)
+		}
+	})
+	w.b.WriteString(`</svg>`)
+	return nil
+}
+
+func (w *svgWriter) Close() error { return nil }
+
+func qrSVG(text string, scale int) (template.HTML, error) {
+	qrc, err := qrcode.New(text)
+	if err != nil {
+		return "", err
+	}
+	w := &svgWriter{scale: scale}
+	if err := qrc.Save(w); err != nil {
+		return "", err
+	}
+	return template.HTML(w.b.String()), nil
 }

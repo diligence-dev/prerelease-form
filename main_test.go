@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	qrcode "github.com/yeqown/go-qrcode/v2"
 	_ "modernc.org/sqlite"
 )
 
@@ -51,7 +52,7 @@ func testDB(t *testing.T) *sql.DB {
 		format TEXT NOT NULL,
 		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
-		paid INTEGER NOT NULL DEFAULT 0,
+		payment TEXT NOT NULL DEFAULT 'unknown',
 		status TEXT NOT NULL DEFAULT 'confirmed'
 	)`)
 	if err != nil {
@@ -73,7 +74,10 @@ func mustInsert(t *testing.T, db *sql.DB, email, name, format, status string) {
 func testConfig() config {
 	return config{
 		weroEmail:      "wero@example.com",
+		weroLink:       "https://wero.example.com/pay",
 		iban:           "DE1234567890",
+		ibanRecipient:  "Test Recipient",
+		bic:            "GENODEM1GLS",
 		organizerEmail: "organizer@example.com",
 		adminToken:     "secret-token",
 	}
@@ -147,8 +151,8 @@ func TestSubmitValidDraft(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/thanks" {
-		t.Fatalf("redirect = %v, want /thanks", loc)
+	if loc == nil || !strings.HasPrefix(loc.Path, "/pay") {
+		t.Fatalf("redirect = %v, want /pay?email=...", loc)
 	}
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
@@ -156,12 +160,15 @@ func TestSubmitValidDraft(t *testing.T) {
 	if mailer.sends[0].to != "test@example.com" {
 		t.Errorf("to = %q, want test@example.com", mailer.sends[0].to)
 	}
-	if !strings.Contains(mailer.sends[0].subject, "Payment details") {
-		t.Errorf("subject missing Payment details: %q", mailer.sends[0].subject)
+	if !strings.Contains(mailer.sends[0].subject, "signed up") {
+		t.Errorf("subject missing 'signed up': %q", mailer.sends[0].subject)
 	}
-	for _, want := range []string{"15", "wero@example.com", "DE1234567890", "/cancel"} {
-		if !strings.Contains(mailer.sends[0].body, want) {
-			t.Errorf("body missing %q", want)
+	if !strings.Contains(mailer.sends[0].body, "/pay?email=") || !strings.Contains(mailer.sends[0].body, "/cancel") {
+		t.Errorf("body missing /pay?email= or /cancel: %q", mailer.sends[0].body)
+	}
+	for _, bad := range []string{"15", "wero@example.com", "DE1234567890"} {
+		if strings.Contains(mailer.sends[0].body, bad) {
+			t.Errorf("body contains %q", bad)
 		}
 	}
 }
@@ -188,8 +195,8 @@ func TestSubmitValidSealed(t *testing.T) {
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
 	}
-	if !strings.Contains(mailer.sends[0].body, "30") {
-		t.Errorf("body missing 30: %q", mailer.sends[0].body)
+	if strings.Contains(mailer.sends[0].body, "30") {
+		t.Errorf("body should not contain amount: %q", mailer.sends[0].body)
 	}
 }
 
@@ -331,11 +338,21 @@ func TestSubmissionsCSVCorrectToken(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
-	if rows[0][len(rows[0])-1] != "status" {
-		t.Errorf("last header = %q, want status", rows[0][len(rows[0])-1])
+	foundPayment := false
+	foundUnknown := false
+	for i, col := range rows[0] {
+		if col == "payment" {
+			foundPayment = true
+			if rows[1][i] == "unknown" {
+				foundUnknown = true
+			}
+		}
 	}
-	if rows[1][len(rows[1])-1] != "confirmed" {
-		t.Errorf("last value = %q, want confirmed", rows[1][len(rows[1])-1])
+	if !foundPayment {
+		t.Errorf("payment column not found in header: %v", rows[0])
+	}
+	if !foundUnknown {
+		t.Errorf("payment value not 'unknown': %v", rows[1])
 	}
 }
 
@@ -359,26 +376,6 @@ func TestHealth(t *testing.T) {
 	}
 }
 
-func TestThanksPage(t *testing.T) {
-	db := testDB(t)
-	mailer := &fakeMailer{}
-	server := setupTestServer(t, db, mailer)
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/thanks")
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "email with payment details") {
-		t.Errorf("body missing expected text: %q", string(body))
-	}
-}
-
 func TestSubmitMailerFailNotifies(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{fail: map[int]bool{0: true}}
@@ -397,6 +394,10 @@ func TestSubmitMailerFailNotifies(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || !strings.HasPrefix(loc.Path, "/pay") {
+		t.Errorf("redirect = %v, want /pay?email=...", loc)
 	}
 	if len(mailer.sends) != 2 {
 		t.Fatalf("sends = %d, want 2", len(mailer.sends))
@@ -425,6 +426,10 @@ func TestSubmitMailerBothFailStillRedirects(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
+	loc, _ := resp.Location()
+	if loc == nil || !strings.HasPrefix(loc.Path, "/pay") {
+		t.Errorf("redirect = %v, want /pay?email=...", loc)
+	}
 }
 
 func TestDraftWaitlist(t *testing.T) {
@@ -450,6 +455,10 @@ func TestDraftWaitlist(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/waitlist" {
+		t.Fatalf("redirect = %v, want /waitlist", loc)
+	}
 
 	var status string
 	err := db.QueryRow("SELECT status FROM submissions WHERE email=?", "waitdraft@example.com").Scan(&status)
@@ -464,14 +473,6 @@ func TestDraftWaitlist(t *testing.T) {
 	}
 	if !strings.Contains(mailer.sends[0].body, "waitlist") {
 		t.Errorf("body missing waitlist: %q", mailer.sends[0].body)
-	}
-	for _, bad := range []string{"15", "IBAN"} {
-		if strings.Contains(mailer.sends[0].body, bad) {
-			t.Errorf("body contains %q", bad)
-		}
-	}
-	if !strings.Contains(mailer.sends[0].body, "/cancel") {
-		t.Errorf("body missing /cancel")
 	}
 }
 
@@ -498,6 +499,10 @@ func TestSealedWaitlist(t *testing.T) {
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/waitlist" {
+		t.Fatalf("redirect = %v, want /waitlist", loc)
+	}
 
 	var status string
 	err := db.QueryRow("SELECT status FROM submissions WHERE email=?", "waitsealed@example.com").Scan(&status)
@@ -506,11 +511,6 @@ func TestSealedWaitlist(t *testing.T) {
 	}
 	if status != "waitlist" {
 		t.Fatalf("status = %q, want waitlist", status)
-	}
-	for _, bad := range []string{"30", "IBAN"} {
-		if strings.Contains(mailer.sends[0].body, bad) {
-			t.Errorf("body contains %q", bad)
-		}
 	}
 }
 
@@ -596,8 +596,11 @@ func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 
 	var promotionFound, organizerFound bool
 	for _, s := range mailer.sends {
-		if s.to == "waiter@example.com" && strings.Contains(s.subject, "Payment details") {
+		if s.to == "waiter@example.com" && strings.Contains(s.subject, "signed up") {
 			promotionFound = true
+			if !strings.Contains(s.body, "/pay?email=") {
+				t.Errorf("promotion email missing /pay?email=: %s", s.body)
+			}
 		}
 		if s.to == "organizer@example.com" && strings.Contains(s.body, "Canceler") && strings.Contains(s.body, "Waiter") {
 			organizerFound = true
@@ -801,6 +804,346 @@ func TestSubmitRejectsCRLFInEmail(t *testing.T) {
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
 	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestEPCPayload(t *testing.T) {
+	got := epcPayload("GENODEM1GLS", "Test Recipient", "DE12345678901234567890", 15, 7)
+	want := "BCD\r\n001\r\n1\r\nSCT\r\nGENODEM1GLS\r\nTest Recipient\r\nDE12345678901234567890\r\nEUR15,00\r\n\r\n\r\n7\r\n\r\n"
+	if got != want {
+		t.Errorf("epcPayload() = %q, want %q", got, want)
+	}
+}
+
+func TestSVGWriter(t *testing.T) {
+	const scale = 8
+	svg, err := qrSVG("test", scale)
+	if err != nil {
+		t.Fatalf("qrSVG error: %v", err)
+	}
+	s := string(svg)
+	if !strings.Contains(s, "<svg") || !strings.Contains(s, "</svg>") {
+		t.Errorf("missing svg tags: %s", s)
+	}
+	if !strings.Contains(s, `<rect`) || !strings.Contains(s, `fill="#000"`) {
+		t.Errorf("missing rect with fill: %s", s)
+	}
+	// Build the QR directly to learn its dimension, then assert the SVG's
+	// width/height equal dim*scale (the svgWriter contract).
+	qrc, err := qrcode.New("test")
+	if err != nil {
+		t.Fatalf("qrcode.New: %v", err)
+	}
+	dim := qrc.Dimension()
+	want := fmt.Sprintf(`width="%d" height="%d"`, dim*scale, dim*scale)
+	if !strings.Contains(s, want) {
+		t.Errorf("svg missing %q: %s", want, s)
+	}
+}
+
+func TestPayPageConfirmed(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "draftuser@example.com", "Draft User", "draft", "confirmed")
+
+	resp, err := http.Get(server.URL + "/pay?email=draftuser@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{"Wero", "IBAN", "Cash", "€15", "<svg"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
+func TestPayPageSealed(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "sealeduser@example.com", "Sealed User", "sealed", "confirmed")
+
+	resp, err := http.Get(server.URL + "/pay?email=sealeduser@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "€30") {
+		t.Errorf("body missing €30: %s", string(body))
+	}
+}
+
+func TestPayPageUnknownEmail(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/pay?email=nobody@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "not available") {
+		t.Errorf("body missing 'not available': %s", string(body))
+	}
+}
+
+func TestPayPageWaitlist(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "waitlist@example.com", "Waitlist User", "draft", "waitlist")
+
+	resp, err := http.Get(server.URL + "/pay?email=waitlist@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "not available") {
+		t.Errorf("body missing 'not available': %s", string(body))
+	}
+}
+
+func TestPayPageCancelled(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
+
+	resp, err := http.Get(server.URL + "/pay?email=cancelled@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "not available") {
+		t.Errorf("body missing 'not available': %s", string(body))
+	}
+}
+
+func TestPayPageAlreadyPaid(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"paid@example.com", "Paid User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "paid")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	resp, err := http.Get(server.URL + "/pay?email=paid@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "Done, I've paid") {
+		t.Errorf("body should not contain payment options: %s", string(body))
+	}
+	for _, opt := range []string{"Pay via Wero", "Pay via IBAN", "Pay Cash"} {
+		if strings.Contains(string(body), opt) {
+			t.Errorf("body should not contain option %q: %s", opt, string(body))
+		}
+	}
+	if !strings.Contains(string(body), "recorded your payment") {
+		t.Errorf("body should show confirmation: %s", string(body))
+	}
+}
+
+func TestPayPageCashMarked(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"cash@example.com", "Cash User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "cash")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	resp, err := http.Get(server.URL + "/pay?email=cash@example.com")
+	if err != nil {
+		t.Fatalf("get /pay: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "pay cash at the event") {
+		t.Errorf("body should show cash confirmation: %s", string(body))
+	}
+}
+
+func TestPayMarkPaidWero(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "weropay@example.com", "Wero Pay", "draft", "confirmed")
+
+	form := url.Values{}
+	form.Set("email", "weropay@example.com")
+	form.Set("method", "wero")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if !strings.HasPrefix(loc.Path, "/pay") {
+		t.Errorf("redirect = %v, want /pay", loc)
+	}
+
+	var payment string
+	err := db.QueryRow("SELECT payment FROM submissions WHERE email=?", "weropay@example.com").Scan(&payment)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if payment != "paid" {
+		t.Errorf("payment = %q, want paid", payment)
+	}
+}
+
+func TestPayMarkPaidIBAN(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "ibanpay@example.com", "IBAN Pay", "draft", "confirmed")
+
+	form := url.Values{}
+	form.Set("email", "ibanpay@example.com")
+	form.Set("method", "iban")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	defer resp.Body.Close()
+
+	var payment string
+	err := db.QueryRow("SELECT payment FROM submissions WHERE email=?", "ibanpay@example.com").Scan(&payment)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if payment != "paid" {
+		t.Errorf("payment = %q, want paid", payment)
+	}
+}
+
+func TestPayMarkCash(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "cashpay@example.com", "Cash Pay", "draft", "confirmed")
+
+	form := url.Values{}
+	form.Set("email", "cashpay@example.com")
+	form.Set("method", "cash")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	defer resp.Body.Close()
+
+	var payment string
+	err := db.QueryRow("SELECT payment FROM submissions WHERE email=?", "cashpay@example.com").Scan(&payment)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if payment != "cash" {
+		t.Errorf("payment = %q, want cash", payment)
+	}
+}
+
+func TestPayLockedAfterMark(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"locked@example.com", "Locked User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "paid")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("email", "locked@example.com")
+	form.Set("method", "cash")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	defer resp.Body.Close()
+
+	var payment string
+	err = db.QueryRow("SELECT payment FROM submissions WHERE email=?", "locked@example.com").Scan(&payment)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if payment != "paid" {
+		t.Errorf("payment changed to %q, should stay paid", payment)
+	}
+}
+
+func TestPayInvalidMethod(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "invalid@example.com", "Invalid", "draft", "confirmed")
+
+	form := url.Values{}
+	form.Set("email", "invalid@example.com")
+	form.Set("method", "bogus")
+	resp, err := http.PostForm(server.URL+"/pay", form)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestPayInvalidEmail(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("email", "")
+	form.Set("method", "wero")
+	resp, err := http.PostForm(server.URL+"/pay", form)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
