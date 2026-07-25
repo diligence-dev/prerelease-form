@@ -36,8 +36,12 @@
 		summary:hover { background: #f0f0f0; }
 		details[open] summary { border-bottom: 1px solid #ddd; }
 		.content { padding: 1rem; }
-		.qr { width: 200px; height: 200px; display: block; margin: 1rem 0; object-fit: contain; }
+		.content svg { width: 500px; height: 500px; display: block; margin: 1rem 0; }
 		.method-info { margin: 0.5rem 0; }
+		table { border-collapse: collapse; width: 100%; margin: 0.5rem 0; }
+		td { padding: 0.1 0; line-height: 1.3; }
+		td:first-child { color: #666; width: 30%; text-align: right; padding-right: 1rem; }
+		td:last-child { font-weight: 500; }
 		button {
 			margin-top: 1rem;
 			padding: 0.75rem 1.25rem;
@@ -55,14 +59,19 @@
 	<div class="card">
 		{{if eq .Payment "unknown"}}
 		<h1>Pay for your {{.Format}} spot</h1>
-		<p class="note">Amount due: €{{.Amount}}</p>
 
 		<details>
 			<summary>Pay via Wero</summary>
 			<div class="content">
+			    <p class="method-info">Scan with Wero-compatible banking app:</p>
 				{{.WeroQR}}
-				<p class="method-info">Or pay via Wero link: <a href="{{.WeroLink}}">{{.WeroLink}}</a></p>
-				<p class="method-info">Or send €{{.Amount}} to: {{.WeroEmail}}</p>
+				<p class="method-info">Or pay via <a href="{{.WeroLink}}">Wero link</a></p>
+				<p class="method-info">Or manually:</p>
+				<table class="method-info">
+					<tr><td>Recipient</td><td>{{.WeroEmail}}</td></tr>
+					<tr><td>Amount</td><td>€{{.Amount}}</td></tr>
+					<tr><td>Message</td><td>{{.Reference}}</td></tr>
+				</table>
 				<form method="POST" action="/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="wero">
@@ -74,12 +83,15 @@
 		<details>
 			<summary>Pay via IBAN</summary>
 			<div class="content">
+			    <p class="method-info">Scan with banking app:</p>
 				{{.EpcQR}}
-				<p class="method-info">Recipient: {{.IBANRecipient}}</p>
-				<p class="method-info">IBAN: {{.IBAN}}</p>
-				<p class="method-info">BIC: {{.BIC}}</p>
-				<p class="method-info">Amount: €{{.Amount}}</p>
-				<p class="method-info">Reference: {{.Reference}}</p>
+				<table class="method-info">
+					<tr><td>Recipient</td><td>{{.IBANRecipient}}</td></tr>
+					<tr><td>IBAN</td><td>{{.IBAN}}</td></tr>
+					<tr><td>BIC</td><td>{{.BIC}}</td></tr>
+					<tr><td>Amount</td><td>€{{.Amount}}</td></tr>
+					<tr><td>Reference</td><td>{{.Reference}}</td></tr>
+				</table>
 				<form method="POST" action="/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="iban">

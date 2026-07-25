@@ -968,8 +968,8 @@ func TestSubmitRejectsCRLFInEmail(t *testing.T) {
 }
 
 func TestEPCPayload(t *testing.T) {
-	got := epcPayload("GENODEM1GLS", "Test Recipient", "DE12345678901234567890", 15, 7)
-	want := "BCD\r\n001\r\n1\r\nSCT\r\nGENODEM1GLS\r\nTest Recipient\r\nDE12345678901234567890\r\nEUR15,00\r\n\r\n\r\n7\r\n\r\n"
+	got := epcPayload("GENODEM1GLS", "Test Recipient", "DE12345678901234567890", 15, "Prerelease id 7")
+	want := "BCD\r\n001\r\n1\r\nSCT\r\nGENODEM1GLS\r\nTest Recipient\r\nDE12345678901234567890\r\nEUR15,00\r\n\r\n\r\nPrerelease id 7\r\n\r\n"
 	if got != want {
 		t.Errorf("epcPayload() = %q, want %q", got, want)
 	}

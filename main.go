@@ -627,7 +627,7 @@ type payPageData struct {
 	IBAN          string
 	IBANRecipient string
 	BIC           string
-	Reference     int
+	Reference     string
 	EpcQR         template.HTML
 	Payment       string
 }
@@ -661,14 +661,16 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 		if format == "sealed" {
 			amount = 30
 		}
+		weroLinkWithAmount := fmt.Sprintf("%s?a=%d00&c=EUR", cfg.weroLink, amount)
 
-		epcPayloadText := epcPayload(cfg.bic, cfg.ibanRecipient, cfg.iban, amount, id)
+		reference := fmt.Sprintf("Prerelease id %d", id)
+		epcPayloadText := epcPayload(cfg.bic, cfg.ibanRecipient, cfg.iban, amount, reference)
 		epcQR, err := qrSVG(epcPayloadText, 8)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
-		weroQR, err := qrSVG(cfg.weroLink, 8)
+		weroQR, err := qrSVG(weroLinkWithAmount, 8)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
@@ -679,12 +681,12 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 			Format:        formatName(format),
 			Amount:        amount,
 			WeroEmail:     cfg.weroEmail,
-			WeroLink:      cfg.weroLink,
+			WeroLink:      weroLinkWithAmount,
 			WeroQR:        weroQR,
 			IBAN:          cfg.iban,
 			IBANRecipient: cfg.ibanRecipient,
 			BIC:           cfg.bic,
-			Reference:     id,
+			Reference:     reference,
 			EpcQR:         epcQR,
 			Payment:       payment,
 		}
@@ -753,9 +755,9 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 	}
 }
 
-func epcPayload(bic, recipient, iban string, amount int, reference int) string {
+func epcPayload(bic, recipient, iban string, amount int, reference string) string {
 	amt := strings.Replace(fmt.Sprintf("%.2f", float64(amount)), ".", ",", 1)
-	return fmt.Sprintf("BCD\r\n001\r\n1\r\nSCT\r\n%s\r\n%s\r\n%s\r\nEUR%s\r\n\r\n\r\n%d\r\n\r\n",
+	return fmt.Sprintf("BCD\r\n001\r\n1\r\nSCT\r\n%s\r\n%s\r\n%s\r\nEUR%s\r\n\r\n\r\n%s\r\n\r\n",
 		bic, recipient, iban, amt, reference)
 }
 

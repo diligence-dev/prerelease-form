@@ -73,7 +73,7 @@ Optional:
 
 ## Payment Details
 - Wero: QR code + manual "send to email" instructions
-- IBAN: EPC QR (EPC069-12) encoding SEPA transfer, plus manual details (recipient, IBAN, BIC, amount, reference=db id)
+- IBAN: EPC QR (EPC069-12) encoding SEPA transfer, plus manual details (recipient, IBAN, BIC, amount, reference="Prerelease id $DB_ID")
 - Cash: user marks intent, confirmed at event
 
 ## Status
