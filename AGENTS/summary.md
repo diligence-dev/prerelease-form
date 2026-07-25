@@ -56,10 +56,13 @@ Optional:
 - `SMTP_FROM` — defaults to `diligence.bot@web.de`.
 - `PORT` — defaults to `8080`.
 - `DATA_PATH` — defaults to `data.db`.
+- `CAPACITY_DRAFT` — number of confirmed draft seats; defaults to 24.
+- `CAPACITY_SEALED` — number of confirmed sealed seats; defaults to 8.
 
 ## Capacities
-- Draft: 24 confirmed seats.
-- Sealed: 8 confirmed seats.
+- Draft: configurable via `CAPACITY_DRAFT` (default 24) confirmed seats.
+- Sealed: configurable via `CAPACITY_SEALED` (default 8) confirmed seats.
+- Invalid capacity values (non-integer or <= 0) are fatal at startup.
 - Over-cap signups become `waitlist`.
 
 ## Database Schema

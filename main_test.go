@@ -80,6 +80,8 @@ func testConfig() config {
 		bic:            "GENODEM1GLS",
 		organizerEmail: "organizer@example.com",
 		adminToken:     "secret-token",
+		draftCap:       24,
+		sealedCap:      8,
 	}
 }
 
@@ -511,6 +513,57 @@ func TestSealedWaitlist(t *testing.T) {
 	}
 	if status != "waitlist" {
 		t.Fatalf("status = %q, want waitlist", status)
+	}
+}
+
+func TestCustomCapacities(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	cfg := testConfig()
+	cfg.draftCap = 3
+	cfg.sealedCap = 2
+	handler, err := setupHandlers(db, mailer, cfg)
+	if err != nil {
+		t.Fatalf("setup handlers: %v", err)
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	for i := 0; i < 3; i++ {
+		mustInsert(t, db, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
+	}
+
+	form := url.Values{}
+	form.Set("email", "waitdraft@example.com")
+	form.Set("name", "Wait Draft")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/waitlist" {
+		t.Fatalf("redirect = %v, want /waitlist", loc)
+	}
+
+	var status string
+	err = db.QueryRow("SELECT status FROM submissions WHERE email=?", "waitdraft@example.com").Scan(&status)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if status != "waitlist" {
+		t.Fatalf("status = %q, want waitlist", status)
+	}
+	if len(mailer.sends) != 1 {
+		t.Fatalf("sends = %d, want 1", len(mailer.sends))
+	}
+	if !strings.Contains(mailer.sends[0].body, "3 draft") {
+		t.Errorf("body missing '3 draft': %q", mailer.sends[0].body)
 	}
 }
 

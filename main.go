@@ -12,16 +12,12 @@ import (
 	"net/smtp"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	qrcode "github.com/yeqown/go-qrcode/v2"
 	_ "modernc.org/sqlite"
-)
-
-const (
-	draftCap  = 24
-	sealedCap = 8
 )
 
 //go:embed index.html pay.html waitlist.html cancel.html
@@ -56,6 +52,8 @@ type config struct {
 	bic            string
 	organizerEmail string
 	adminToken     string
+	draftCap       int
+	sealedCap      int
 }
 
 // loadConfig reads configuration from the environment and validates required
@@ -70,6 +68,8 @@ func loadConfig() config {
 		bic:            os.Getenv("BIC"),
 		organizerEmail: getenv("ORGANIZER_EMAIL", "diligence.dev@web.de"),
 		adminToken:     os.Getenv("ADMIN_TOKEN"),
+		draftCap:       getenvInt("CAPACITY_DRAFT", 24),
+		sealedCap:      getenvInt("CAPACITY_SEALED", 8),
 	}
 	if cfg.weroEmail == "" {
 		log.Fatalf("WERO_EMAIL not set")
@@ -138,6 +138,18 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
+func getenvInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		log.Fatalf("%s invalid: %q", key, v)
+	}
+	return n
+}
+
 func initSchema(db *sql.DB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS submissions (
 		id INTEGER PRIMARY KEY,
@@ -163,7 +175,7 @@ func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) 
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", indexHandler(db, indexTmpl))
+	mux.HandleFunc("GET /{$}", indexHandler(db, indexTmpl, cfg.draftCap, cfg.sealedCap))
 	mux.HandleFunc("POST /submit", submitHandler(db, mailer, cfg))
 	mux.HandleFunc("GET /pay", payHandler(db, payTmpl, cfg))
 	mux.HandleFunc("POST /pay", postPayHandler(db, cfg))
@@ -180,7 +192,7 @@ type seatCounts struct {
 	SealedSeatsLeft int
 }
 
-func indexHandler(db *sql.DB, tmpl *template.Template) http.HandlerFunc {
+func indexHandler(db *sql.DB, tmpl *template.Template, draftCap, sealedCap int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		draftLeft, err := seatsLeft(db, "draft", draftCap)
 		if err != nil {
@@ -272,10 +284,10 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			return
 		}
 
-		cap := draftCap
+		cap := cfg.draftCap
 		amount := 15
 		if format == "sealed" {
-			cap = sealedCap
+			cap = cfg.sealedCap
 			amount = 30
 		}
 
@@ -337,7 +349,7 @@ All %s seats are currently taken, so you've been added to the waitlist.
 You'll receive another email with payment details as soon as a seat opens up for you.
 
 If you no longer wish to be on the waitlist, cancel at %s/cancel using your email address.
-`, name, formatName(format), seatTotal(format), host)
+`, name, formatName(format), seatTotal(format, cap), host)
 		}
 
 		if err := mailer.Send(email, subject, body); err != nil {
@@ -369,11 +381,8 @@ func formatName(format string) string {
 	return "Sealed"
 }
 
-func seatTotal(format string) string {
-	if format == "draft" {
-		return "24 draft"
-	}
-	return "8 sealed"
+func seatTotal(format string, cap int) string {
+	return fmt.Sprintf("%d %s", cap, format)
 }
 
 func confirmationEmailBody(name, format, email, host string) string {
