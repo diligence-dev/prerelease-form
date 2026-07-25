@@ -20,7 +20,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed index.html pay.html waitlist.html cancel.html
+//go:embed index.html pay.html waitlist.html cancel.html organizer.html
 var embeddedFiles embed.FS
 
 type Mailer interface {
@@ -173,6 +173,10 @@ func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) 
 	if err != nil {
 		return nil, err
 	}
+	organizerTmpl, err := template.ParseFS(embeddedFiles, "organizer.html")
+	if err != nil {
+		return nil, err
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", indexHandler(db, indexTmpl, cfg.draftCap, cfg.sealedCap))
@@ -182,7 +186,7 @@ func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) 
 	mux.HandleFunc("GET /waitlist", staticHandler("waitlist.html"))
 	mux.HandleFunc("GET /cancel", staticHandler("cancel.html"))
 	mux.HandleFunc("POST /cancel", cancelHandler(db, mailer, cfg))
-	mux.HandleFunc("GET /submissions.csv", csvHandler(db, cfg))
+	mux.HandleFunc("GET /organizer", organizerHandler(db, organizerTmpl, cfg))
 	mux.HandleFunc("GET /health", healthHandler)
 	return mux, nil
 }
@@ -399,52 +403,99 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("ok"))
 }
 
-func csvHandler(db *sql.DB, cfg config) http.HandlerFunc {
+type organizerRow struct {
+	ID      int
+	Email   string
+	Name    string
+	Format  string
+	Payment string
+	Status  string
+	Italic  bool
+	Strike  bool
+}
+
+func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := r.URL.Query().Get("token")
-		if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.adminToken)) != 1 {
+		user, pass, ok := r.BasicAuth()
+		if !ok || user != "admin" || subtle.ConstantTimeCompare([]byte(pass), []byte(cfg.adminToken)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="organizer"`)
 			writeText(w, http.StatusUnauthorized, "Unauthorized")
 			return
 		}
 
-		rows, err := db.Query("SELECT id, email, name, format, mailing_list, created_at, payment, status FROM submissions ORDER BY created_at DESC")
+		rows, err := db.Query(`SELECT id, email, name, format, mailing_list, created_at, payment, status
+			FROM submissions
+			ORDER BY CASE status
+				WHEN 'confirmed' THEN 0
+				WHEN 'waitlist'  THEN 1
+				WHEN 'cancelled' THEN 2
+				ELSE 3
+			END, name COLLATE NOCASE ASC`)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 		defer rows.Close()
 
-		w.Header().Set("Content-Type", "text/csv")
-		w.Header().Set("Content-Disposition", "attachment; filename=\"submissions.csv\"")
-		writer := csv.NewWriter(w)
-		if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status"}); err != nil {
-			log.Printf("csv write header: %v", err)
+		if r.URL.Query().Get("export") == "csv" {
+			w.Header().Set("Content-Type", "text/csv")
+			w.Header().Set("Content-Disposition", "attachment; filename=\"submissions.csv\"")
+			writer := csv.NewWriter(w)
+			if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status"}); err != nil {
+				log.Printf("csv write header: %v", err)
+				return
+			}
+			for rows.Next() {
+				var id, mailingList int
+				var email, name, format, createdAt, payment, status string
+				if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status); err != nil {
+					log.Printf("csv scan row: %v", err)
+					return
+				}
+				if err := writer.Write([]string{
+					fmt.Sprintf("%d", id),
+					email,
+					name,
+					format,
+					fmt.Sprintf("%d", mailingList),
+					createdAt,
+					payment,
+					status,
+				}); err != nil {
+					log.Printf("csv write row: %v", err)
+					return
+				}
+			}
+			writer.Flush()
+			if err := writer.Error(); err != nil {
+				log.Printf("csv flush: %v", err)
+			}
 			return
 		}
+
+		var organizerRows []organizerRow
 		for rows.Next() {
 			var id, mailingList int
 			var email, name, format, createdAt, payment, status string
 			if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status); err != nil {
-				log.Printf("csv scan row: %v", err)
+				log.Printf("organizer scan row: %v", err)
 				return
 			}
-			if err := writer.Write([]string{
-				fmt.Sprintf("%d", id),
-				email,
-				name,
-				format,
-				fmt.Sprintf("%d", mailingList),
-				createdAt,
-				payment,
-				status,
-			}); err != nil {
-				log.Printf("csv write row: %v", err)
-				return
-			}
+			organizerRows = append(organizerRows, organizerRow{
+				ID:      id,
+				Email:   email,
+				Name:    name,
+				Format:  format,
+				Payment: payment,
+				Status:  status,
+				Italic:  format == "sealed",
+				Strike:  status == "waitlist" || status == "cancelled",
+			})
 		}
-		writer.Flush()
-		if err := writer.Error(); err != nil {
-			log.Printf("csv flush: %v", err)
+
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, organizerRows); err != nil {
+			log.Printf("organizer template execute: %v", err)
 		}
 	}
 }

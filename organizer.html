@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prerelease — Submissions</title>
+    <style>
+        @page { size: A4 portrait; margin: 1.5cm }
+        @media print {
+            .no-print { display: none }
+        }
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 12pt;
+            color: #000;
+            background: #fff;
+            margin: 0;
+            padding: 1cm;
+        }
+        .no-print {
+            margin-bottom: 1em;
+        }
+        .no-print a {
+            display: inline-block;
+            padding: 0.5em 1em;
+            background: #ccc;
+            color: #000;
+            text-decoration: none;
+            border: 1px solid #999;
+        }
+        .no-print a:hover {
+            background: #bbb;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            border: 1px solid #000;
+            padding: 0.5em;
+            text-align: left;
+        }
+        th {
+            background: #eee;
+            font-weight: bold;
+        }
+        .italic {
+            font-style: italic;
+        }
+        .strike {
+            text-decoration: line-through;
+        }
+        thead tr {
+            margin-bottom: 1em;
+        }
+        tbody tr:nth-child(2n) {
+            margin-bottom: 0.5em;
+        }
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <a href="/organizer?export=csv">Export CSV</a>
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Format</th>
+                <th>Payment</th>
+                <th>Id</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .}}<tr{{if .Italic}} class="italic"{{end}}{{if and (not .Italic) .Strike}} class="strike"{{end}}{{if and .Italic .Strike}} class="italic strike"{{end}}>
+                <td>{{.Name}}</td>
+                <td>{{.Email}}</td>
+                <td>{{.Format}}</td>
+                <td>{{.Payment}}</td>
+                <td>{{.ID}}</td>
+                <td>{{.Status}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>

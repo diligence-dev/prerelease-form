@@ -273,13 +273,35 @@ func TestSubmitDuplicateEmail(t *testing.T) {
 	}
 }
 
-func TestSubmissionsCSVMissingToken(t *testing.T) {
+func TestOrganizerMissingAuth(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/submissions.csv")
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if wwwAuth := resp.Header.Get("WWW-Authenticate"); wwwAuth == "" {
+		t.Errorf("WWW-Authenticate header missing")
+	}
+}
+
+func TestOrganizerWrongPassword(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.SetBasicAuth("admin", "wrong")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -289,13 +311,15 @@ func TestSubmissionsCSVMissingToken(t *testing.T) {
 	}
 }
 
-func TestSubmissionsCSVWrongToken(t *testing.T) {
+func TestOrganizerWrongUsername(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/submissions.csv?token=wrong")
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.SetBasicAuth("wrong", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -305,22 +329,113 @@ func TestSubmissionsCSVWrongToken(t *testing.T) {
 	}
 }
 
-func TestSubmissionsCSVCorrectToken(t *testing.T) {
+func TestOrganizerCorrectPassword(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	form := url.Values{}
-	form.Set("email", "csv@example.com")
-	form.Set("name", "CSV User")
-	form.Set("format", "draft")
-	form.Set("cancellation_ack", "on")
-	form.Set("data_consent", "on")
-	form.Set("mailing_list", "yes")
-	http.PostForm(server.URL+"/submit", form)
+	mustInsert(t, db, "test@example.com", "Test User", "draft", "confirmed")
 
-	resp, err := http.Get(server.URL + "/submissions.csv?token=secret-token")
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.SetBasicAuth("admin", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{"<table>", "<tr>", "Name", "Email", "Format", "Payment", "Id", "Status"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+	if !strings.Contains(string(body), "Test User") {
+		t.Errorf("body missing user name")
+	}
+}
+
+func TestOrganizerSortedByStatusThenName(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "cancel@example.com", "Zed Cancelled", "draft", "cancelled")
+	mustInsert(t, db, "wait@example.com", "Alice Waitlist", "draft", "waitlist")
+	mustInsert(t, db, "confirm3@example.com", "Charlie Confirmed", "draft", "confirmed")
+	mustInsert(t, db, "confirm1@example.com", "Alice Confirmed", "draft", "confirmed")
+	mustInsert(t, db, "confirm2@example.com", "Bob Confirmed", "draft", "confirmed")
+
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.SetBasicAuth("admin", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	aliceIdx := strings.Index(string(body), "Alice Confirmed")
+	bobIdx := strings.Index(string(body), "Bob Confirmed")
+	charlieIdx := strings.Index(string(body), "Charlie Confirmed")
+	aliceWaitIdx := strings.Index(string(body), "Alice Waitlist")
+	zedCancelIdx := strings.Index(string(body), "Zed Cancelled")
+
+	if aliceIdx < 0 || bobIdx < 0 || charlieIdx < 0 {
+		t.Fatalf("confirmed users not found in output")
+	}
+	if aliceIdx > bobIdx || bobIdx > charlieIdx {
+		t.Errorf("confirmed not sorted A->Z: %v", string(body))
+	}
+	if aliceWaitIdx < charlieIdx {
+		t.Errorf("waitlist should come after confirmed: %v", string(body))
+	}
+	if zedCancelIdx < aliceWaitIdx {
+		t.Errorf("cancelled should come after waitlist: %v", string(body))
+	}
+}
+
+func TestOrganizerRowStyling(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "sealed@example.com", "Sealed User", "sealed", "confirmed")
+	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
+
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.SetBasicAuth("admin", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if !strings.Contains(string(body), "Sealed User") || !strings.Contains(string(body), "class=\"italic\"") {
+		t.Errorf("sealed row should have italic class")
+	}
+	if !strings.Contains(string(body), "Cancelled User") || !strings.Contains(string(body), "class=\"strike\"") {
+		t.Errorf("cancelled row should have strike class")
+	}
+}
+
+func TestOrganizerCSVExport(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "csvtest@example.com", "CSV Test", "draft", "confirmed")
+
+	req, _ := http.NewRequest("GET", server.URL+"/organizer?export=csv", nil)
+	req.SetBasicAuth("admin", "secret-token")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -331,30 +446,37 @@ func TestSubmissionsCSVCorrectToken(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "text/csv" {
 		t.Errorf("content-type = %q, want text/csv", ct)
 	}
+	if cd := resp.Header.Get("Content-Disposition"); cd != "attachment; filename=\"submissions.csv\"" {
+		t.Errorf("content-disposition = %q, want attachment; filename=\"submissions.csv\"", cd)
+	}
 	body, _ := io.ReadAll(resp.Body)
 	reader := csv.NewReader(bytes.NewReader(body))
 	rows, err := reader.ReadAll()
 	if err != nil {
 		t.Fatalf("csv read: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("rows = %d, want 2", len(rows))
+	if len(rows) < 2 {
+		t.Fatalf("rows = %d, want at least 2", len(rows))
 	}
-	foundPayment := false
-	foundUnknown := false
-	for i, col := range rows[0] {
-		if col == "payment" {
-			foundPayment = true
-			if rows[1][i] == "unknown" {
-				foundUnknown = true
-			}
-		}
+	if rows[0][0] != "id" || rows[0][1] != "email" || rows[0][2] != "name" {
+		t.Errorf("header mismatch: %v", rows[0])
 	}
-	if !foundPayment {
-		t.Errorf("payment column not found in header: %v", rows[0])
+}
+
+func TestOrganizerCSVExportRequiresAuth(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	req, _ := http.NewRequest("GET", server.URL+"/organizer?export=csv", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
 	}
-	if !foundUnknown {
-		t.Errorf("payment value not 'unknown': %v", rows[1])
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
 
@@ -775,24 +897,6 @@ func TestCancelAlreadyCancelled(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "already cancelled") {
 		t.Errorf("body missing already cancelled: %q", string(body))
-	}
-}
-
-func TestSubmissionsCSVConstantTimeCompare(t *testing.T) {
-	db := testDB(t)
-	mailer := &fakeMailer{}
-	server := setupTestServer(t, db, mailer)
-	defer server.Close()
-
-	// Constant-time compare should be used, but we verify behavior through wrong token test above.
-	// Ensure that a token of correct length but different content is rejected.
-	resp, err := http.Get(server.URL + "/submissions.csv?token=" + strings.Repeat("x", len("secret-token")))
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
 

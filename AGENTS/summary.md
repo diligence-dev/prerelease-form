@@ -36,7 +36,8 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - `GET /waitlist` — static waitlist notice.
 - `GET /cancel` — static cancellation form.
 - `POST /cancel` — cancels by email, promotes oldest waitlister for the same format, emails promoted person and notifies organizer.
-- `GET /submissions.csv?token=<ADMIN_TOKEN>` — CSV export with `payment` column (states: unknown/paid/cash), constant-time token check.
+- `GET /organizer` — Password-protected HTML table view of submissions (Basic Auth: username `admin`, password `ADMIN_TOKEN`). Shows columns: name, email, format, payment, id, status. Sorted by status (confirmed → waitlist → cancelled), then name alphabetically. Sealed rows italic, cancelled/waitlist rows strikethrough. A4 print-optimized.
+- `GET /organizer?export=csv` — Same auth as HTML view, exports CSV with columns: id, email, name, format, mailing_list, created_at, payment, status.
 - `GET /health` — returns "ok".
 
 ## Configuration
