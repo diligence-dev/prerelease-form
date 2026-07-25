@@ -23,6 +23,7 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - `go.mod` / `go.sum` — Go module files.
 - `Dockerfile` — multi-stage scratch build.
 - `fly.toml` — Fly.io configuration.
+- `.github/workflows/fly.yml` — GitHub Action that runs `flyctl deploy --remote-only` on push to `main` (requires `FLY_API_TOKEN` repo secret).
 - `plan.md` — implementation plan.
 - `AGENTS/AGENTS.md` — agent guidelines.
 - `AGENTS/summary.md` — this file.
