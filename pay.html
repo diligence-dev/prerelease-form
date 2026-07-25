@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="{{.Lang}}">
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Pay for your spot</title>
+	<title>{{T .Lang "title_pay"}}</title>
 	<style>
 		body {
 			font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -58,64 +58,64 @@
 <body>
 	<div class="card">
 		{{if eq .Payment "unknown"}}
-		<h1>Pay for your {{.Format}} spot</h1>
+		<h1>{{T .Lang "heading_pay" .Format}}</h1>
 
 		<details>
-			<summary>Pay via Wero</summary>
+			<summary>{{T .Lang "summary_wero"}}</summary>
 			<div class="content">
-			    <p class="method-info">Scan with Wero-compatible banking app:</p>
+			    <p class="method-info">{{T .Lang "scan_wero"}}</p>
 				{{.WeroQR}}
-				<p class="method-info">Or pay via <a href="{{.WeroLink}}">Wero link</a></p>
-				<p class="method-info">Or manually:</p>
+				<p class="method-info">{{T .Lang "or_pay_via"}} <a href="{{.WeroLink}}">Wero</a></p>
+				<p class="method-info">{{T .Lang "or_manually"}}</p>
 				<table class="method-info">
-					<tr><td>Recipient</td><td>{{.WeroEmail}}</td></tr>
-					<tr><td>Amount</td><td>€{{.Amount}}</td></tr>
-					<tr><td>Message</td><td>{{.Reference}}</td></tr>
+					<tr><td>{{T .Lang "label_recipient"}}</td><td>{{.WeroEmail}}</td></tr>
+					<tr><td>{{T .Lang "label_amount"}}</td><td>€{{.Amount}}</td></tr>
+					<tr><td>{{T .Lang "label_message"}}</td><td>{{.Reference}}</td></tr>
 				</table>
-				<form method="POST" action="/pay">
+				<form method="POST" action="/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="wero">
-					<button type="submit">Done, I've paid</button>
+					<button type="submit">{{T .Lang "button_paid"}}</button>
 				</form>
 			</div>
 		</details>
 
 		<details>
-			<summary>Pay via IBAN</summary>
+			<summary>{{T .Lang "summary_iban"}}</summary>
 			<div class="content">
-			    <p class="method-info">Scan with banking app:</p>
+			    <p class="method-info">{{T .Lang "scan_banking"}}</p>
 				{{.EpcQR}}
 				<table class="method-info">
-					<tr><td>Recipient</td><td>{{.IBANRecipient}}</td></tr>
-					<tr><td>IBAN</td><td>{{.IBAN}}</td></tr>
-					<tr><td>BIC</td><td>{{.BIC}}</td></tr>
-					<tr><td>Amount</td><td>€{{.Amount}}</td></tr>
-					<tr><td>Reference</td><td>{{.Reference}}</td></tr>
+					<tr><td>{{T .Lang "label_recipient"}}</td><td>{{.IBANRecipient}}</td></tr>
+					<tr><td>{{T .Lang "label_iban"}}</td><td>{{.IBAN}}</td></tr>
+					<tr><td>{{T .Lang "label_bic"}}</td><td>{{.BIC}}</td></tr>
+					<tr><td>{{T .Lang "label_amount"}}</td><td>€{{.Amount}}</td></tr>
+					<tr><td>{{T .Lang "label_reference"}}</td><td>{{.Reference}}</td></tr>
 				</table>
-				<form method="POST" action="/pay">
+				<form method="POST" action="/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="iban">
-					<button type="submit">Done, I've paid</button>
+					<button type="submit">{{T .Lang "button_paid"}}</button>
 				</form>
 			</div>
 		</details>
 
 		<details>
-			<summary>Pay Cash at the event</summary>
+			<summary>{{T .Lang "summary_cash"}}</summary>
 			<div class="content">
-				<p class="method-info">You can pay in cash when you arrive at the event.</p>
-				<form method="POST" action="/pay">
+				<p class="method-info">{{T .Lang "cash_info"}}</p>
+				<form method="POST" action="/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="cash">
-					<button type="submit">I'll pay cash at the event</button>
+					<button type="submit">{{T .Lang "button_cash"}}</button>
 				</form>
 			</div>
 		</details>
 		{{else}}
-		<h1>Thanks!</h1>
-		{{if eq .Payment "paid"}}<p>We've recorded your payment.</p>{{end}}
-		{{if eq .Payment "cash"}}<p>We've recorded that you'll pay cash at the event.</p>{{end}}
-		<p>We look forward to seeing you at the event!</p>
+		<h1>{{T .Lang "heading_thanks"}}</h1>
+		{{if eq .Payment "paid"}}<p>{{T .Lang "recorded_payment"}}</p>{{end}}
+		{{if eq .Payment "cash"}}<p>{{T .Lang "recorded_cash"}}</p>{{end}}
+		<p>{{T .Lang "look_forward"}}</p>
 		{{end}}
 	</div>
 </body>

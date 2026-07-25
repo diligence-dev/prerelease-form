@@ -159,57 +159,101 @@ func initSchema(db *sql.DB) error {
 		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
 		payment TEXT NOT NULL DEFAULT 'unknown',
-		status TEXT NOT NULL DEFAULT 'confirmed'
+		status TEXT NOT NULL DEFAULT 'confirmed',
+		lang TEXT NOT NULL DEFAULT 'en'
 	)`)
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE submissions ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) {
-	indexTmpl, err := template.ParseFS(embeddedFiles, "index.html")
+	funcMap := template.FuncMap{"T": T}
+
+	indexTmpl, err := template.New("index.html").Funcs(funcMap).ParseFS(embeddedFiles, "index.html")
 	if err != nil {
 		return nil, err
 	}
-	payTmpl, err := template.ParseFS(embeddedFiles, "pay.html")
+	payTmpl, err := template.New("pay.html").Funcs(funcMap).ParseFS(embeddedFiles, "pay.html")
 	if err != nil {
 		return nil, err
 	}
-	organizerTmpl, err := template.ParseFS(embeddedFiles, "organizer.html")
+	waitlistTmpl, err := template.New("waitlist.html").Funcs(funcMap).ParseFS(embeddedFiles, "waitlist.html")
+	if err != nil {
+		return nil, err
+	}
+	cancelTmpl, err := template.New("cancel.html").Funcs(funcMap).ParseFS(embeddedFiles, "cancel.html")
+	if err != nil {
+		return nil, err
+	}
+	organizerTmpl, err := template.New("organizer.html").Funcs(funcMap).ParseFS(embeddedFiles, "organizer.html")
 	if err != nil {
 		return nil, err
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", indexHandler(db, indexTmpl, cfg.draftCap, cfg.sealedCap))
-	mux.HandleFunc("POST /submit", submitHandler(db, mailer, cfg))
-	mux.HandleFunc("GET /pay", payHandler(db, payTmpl, cfg))
-	mux.HandleFunc("POST /pay", postPayHandler(db, cfg))
-	mux.HandleFunc("GET /waitlist", staticHandler("waitlist.html"))
-	mux.HandleFunc("GET /cancel", staticHandler("cancel.html"))
-	mux.HandleFunc("POST /cancel", cancelHandler(db, mailer, cfg))
+	mux.HandleFunc("GET /{$}", rootRedirectHandler())
+	mux.HandleFunc("GET /{lang}/{$}", localizedHandler(indexHandler(db, indexTmpl, cfg.draftCap, cfg.sealedCap)))
+	mux.HandleFunc("POST /{lang}/submit", localizedHandler(submitHandler(db, mailer, cfg)))
+	mux.HandleFunc("GET /{lang}/pay", localizedHandler(payHandler(db, payTmpl, cfg)))
+	mux.HandleFunc("POST /{lang}/pay", localizedHandler(postPayHandler(db, cfg)))
+	mux.HandleFunc("GET /{lang}/waitlist", localizedHandler(waitlistHandler(waitlistTmpl)))
+	mux.HandleFunc("GET /{lang}/cancel", localizedHandler(cancelFormHandler(cancelTmpl)))
+	mux.HandleFunc("POST /{lang}/cancel", localizedHandler(cancelHandler(db, mailer, cfg)))
 	mux.HandleFunc("GET /organizer", organizerHandler(db, organizerTmpl, cfg))
 	mux.HandleFunc("GET /health", healthHandler)
 	return mux, nil
 }
 
+func rootRedirectHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		lang := parseAcceptLanguage(r.Header.Get("Accept-Language"))
+		http.Redirect(w, r, "/"+lang+"/", http.StatusFound)
+	}
+}
+
+func localizedHandler(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
+		if lang != "en" && lang != "de" {
+			rest := strings.TrimPrefix(r.URL.Path, "/"+lang)
+			target := "/en" + rest
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		h(w, r)
+	}
+}
+
 type seatCounts struct {
+	Lang            string
 	DraftSeatsLeft  int
 	SealedSeatsLeft int
 }
 
 func indexHandler(db *sql.DB, tmpl *template.Template, draftCap, sealedCap int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
 		draftLeft, err := seatsLeft(db, "draft", draftCap)
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 		sealedLeft, err := seatsLeft(db, "sealed", sealedCap)
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, seatCounts{DraftSeatsLeft: draftLeft, SealedSeatsLeft: sealedLeft}); err != nil {
+		if err := tmpl.Execute(w, seatCounts{Lang: lang, DraftSeatsLeft: draftLeft, SealedSeatsLeft: sealedLeft}); err != nil {
 			log.Printf("index template execute: %v", err)
 		}
 	}
@@ -228,15 +272,31 @@ func seatsLeft(db *sql.DB, format string, cap int) (int, error) {
 	return left, nil
 }
 
-func staticHandler(name string) http.HandlerFunc {
+type waitlistData struct {
+	Lang string
+}
+
+func waitlistHandler(tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		data, err := embeddedFiles.ReadFile(name)
-		if err != nil {
-			writeText(w, http.StatusNotFound, "not found")
-			return
-		}
+		lang := r.PathValue("lang")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		if err := tmpl.Execute(w, waitlistData{Lang: lang}); err != nil {
+			log.Printf("waitlist template execute: %v", err)
+		}
+	}
+}
+
+type cancelData struct {
+	Lang string
+}
+
+func cancelFormHandler(tmpl *template.Template) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if err := tmpl.Execute(w, cancelData{Lang: lang}); err != nil {
+			log.Printf("cancel template execute: %v", err)
+		}
 	}
 }
 
@@ -258,8 +318,10 @@ func hasNewline(s string) bool {
 
 func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
+
 		if err := r.ParseForm(); err != nil {
-			writeText(w, http.StatusBadRequest, "invalid form")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_form"))
 			return
 		}
 
@@ -272,19 +334,19 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		switch {
 		case email == "" || !strings.Contains(email, "@") || hasNewline(email):
-			writeText(w, http.StatusBadRequest, "Invalid email.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_email"))
 			return
 		case name == "" || len(name) > 200 || hasNewline(name):
-			writeText(w, http.StatusBadRequest, "Invalid name.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_name"))
 			return
 		case format != "draft" && format != "sealed":
-			writeText(w, http.StatusBadRequest, "Invalid format.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_format"))
 			return
 		case cancellationAck != "on":
-			writeText(w, http.StatusBadRequest, "Cancellation acknowledgement required.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_cancel_ack_required"))
 			return
 		case dataConsent != "on":
-			writeText(w, http.StatusBadRequest, "Data consent required.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_data_consent_required"))
 			return
 		}
 
@@ -302,7 +364,7 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		tx, err := db.Begin()
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 		defer tx.Rollback()
@@ -310,7 +372,7 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		var confirmedCount int
 		err = tx.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND status='confirmed'", format).Scan(&confirmedCount)
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
@@ -321,20 +383,20 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		createdAt := time.Now().UTC().Format(time.RFC3339)
 		_, err = tx.Exec(
-			"INSERT INTO submissions (email, name, format, mailing_list, created_at, status) VALUES (?, ?, ?, ?, ?, ?)",
-			email, name, format, mailingListInt, createdAt, status,
+			"INSERT INTO submissions (email, name, format, mailing_list, created_at, status, lang) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			email, name, format, mailingListInt, createdAt, status, lang,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
-				writeText(w, http.StatusConflict, "You have already registered with this email.")
+				writeText(w, http.StatusConflict, T(lang, "msg_already_registered"))
 				return
 			}
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
 		if err := tx.Commit(); err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
@@ -342,18 +404,11 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		var subject, body string
 		if status == "confirmed" {
-			subject = "Prerelease – You're signed up"
-			body = confirmationEmailBody(name, format, email, host)
+			subject = T(lang, "subject_confirmed")
+			body = confirmationEmailBody(name, format, email, host, lang)
 		} else {
-			subject = "Prerelease – You're on the waitlist"
-			body = fmt.Sprintf(`Hi %s,
-
-Thanks for signing up for %s.
-All %s seats are currently taken, so you've been added to the waitlist.
-You'll receive another email with payment details as soon as a seat opens up for you.
-
-If you no longer wish to be on the waitlist, cancel at %s/cancel.
-`, name, formatName(format), seatTotal(format, cap), host)
+			subject = T(lang, "subject_waitlist")
+			body = T(lang, "body_waitlist", name, formatName(format), seatTotal(format, cap), host, lang)
 		}
 
 		if err := mailer.Send(email, subject, body); err != nil {
@@ -371,9 +426,9 @@ If you no longer wish to be on the waitlist, cancel at %s/cancel.
 		}
 
 		if status == "confirmed" {
-			http.Redirect(w, r, "/pay?email="+url.QueryEscape(email), http.StatusFound)
+			http.Redirect(w, r, "/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
 		} else {
-			http.Redirect(w, r, "/waitlist", http.StatusFound)
+			http.Redirect(w, r, "/"+lang+"/waitlist", http.StatusFound)
 		}
 	}
 }
@@ -386,17 +441,11 @@ func formatName(format string) string {
 }
 
 func seatTotal(format string, cap int) string {
-	return fmt.Sprintf("%d %s", cap, format)
+	return fmt.Sprintf("%d %s", cap, formatName(format))
 }
 
-func confirmationEmailBody(name, format, email, host string) string {
-	return fmt.Sprintf(`Hi %s,
-
-you are signed up for the prerelease - you will be playing %s!
-If you haven't already, pay for your spot here: %s/pay?email=%s
-If you can no longer attend, cancel at %s/cancel.
-Looking forward to seeing you at the event!
-`, name, formatName(format), host, url.QueryEscape(email), host)
+func confirmationEmailBody(name, format, email, host, lang string) string {
+	return T(lang, "body_confirmed", name, formatName(format), host, lang, url.QueryEscape(email), host, lang)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -502,14 +551,16 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 
 func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
+
 		if err := r.ParseForm(); err != nil {
-			writeText(w, http.StatusBadRequest, "invalid form")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_form"))
 			return
 		}
 
 		email := strings.TrimSpace(r.FormValue("email"))
 		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
-			writeText(w, http.StatusBadRequest, "Invalid email.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_email"))
 			return
 		}
 
@@ -517,16 +568,16 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		var name, format, status string
 		err := db.QueryRow("SELECT id, name, format, status FROM submissions WHERE email=?", email).Scan(&id, &name, &format, &status)
 		if err == sql.ErrNoRows {
-			writeText(w, http.StatusOK, "No registration found for that email.")
+			writeText(w, http.StatusOK, T(lang, "msg_no_registration"))
 			return
 		}
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
 		if status == "cancelled" {
-			writeText(w, http.StatusOK, "Your registration was already cancelled.")
+			writeText(w, http.StatusOK, T(lang, "msg_already_cancelled"))
 			return
 		}
 
@@ -535,31 +586,31 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		if status == "confirmed" {
 			tx, err := db.Begin()
 			if err != nil {
-				writeText(w, http.StatusInternalServerError, "server error")
+				writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 				return
 			}
 			defer tx.Rollback()
 
 			_, err = tx.Exec("UPDATE submissions SET status='cancelled' WHERE id=?", id)
 			if err != nil {
-				writeText(w, http.StatusInternalServerError, "server error")
+				writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 				return
 			}
 
 			var promotedID int
-			var promotedEmail, promotedName string
-			err = tx.QueryRow("SELECT id, email, name FROM submissions WHERE format=? AND status='waitlist' ORDER BY created_at ASC LIMIT 1", format).Scan(&promotedID, &promotedEmail, &promotedName)
+			var promotedEmail, promotedName, promotedLang string
+			err = tx.QueryRow("SELECT id, email, name, lang FROM submissions WHERE format=? AND status='waitlist' ORDER BY created_at ASC LIMIT 1", format).Scan(&promotedID, &promotedEmail, &promotedName, &promotedLang)
 			promoted := err == nil
 			if promoted {
 				_, err = tx.Exec("UPDATE submissions SET status='confirmed' WHERE id=?", promotedID)
 				if err != nil {
-					writeText(w, http.StatusInternalServerError, "server error")
+					writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 					return
 				}
 			}
 
 			if err := tx.Commit(); err != nil {
-				writeText(w, http.StatusInternalServerError, "server error")
+				writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 				return
 			}
 			amount := 15
@@ -568,8 +619,8 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			}
 
 			if promoted {
-				subject := "Prerelease – You're signed up"
-				body := confirmationEmailBody(promotedName, format, promotedEmail, host)
+				subject := T(promotedLang, "subject_confirmed")
+				body := confirmationEmailBody(promotedName, format, promotedEmail, host, promotedLang)
 				if err := mailer.Send(promotedEmail, subject, body); err != nil {
 					log.Printf("failed to send promotion email to %s: %v", promotedEmail, err)
 					failSubject := fmt.Sprintf("Failed to send payment mail to %s", promotedEmail)
@@ -592,14 +643,14 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 				log.Printf("failed to send organizer notification: %v", err)
 			}
 
-			writeText(w, http.StatusOK, "Your registration has been cancelled.")
+			writeText(w, http.StatusOK, T(lang, "msg_registration_cancelled"))
 			return
 		}
 
 		if status == "waitlist" {
 			_, err := db.Exec("UPDATE submissions SET status='cancelled' WHERE id=?", id)
 			if err != nil {
-				writeText(w, http.StatusInternalServerError, "server error")
+				writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 				return
 			}
 
@@ -609,15 +660,16 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 				log.Printf("failed to send organizer notification: %v", err)
 			}
 
-			writeText(w, http.StatusOK, "Your waitlist spot has been cancelled.")
+			writeText(w, http.StatusOK, T(lang, "msg_waitlist_cancelled"))
 			return
 		}
 
-		writeText(w, http.StatusInternalServerError, "server error")
+		writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 	}
 }
 
 type payPageData struct {
+	Lang          string
 	Email         string
 	Format        string
 	Amount        int
@@ -634,9 +686,10 @@ type payPageData struct {
 
 func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
 		email := strings.TrimSpace(r.URL.Query().Get("email"))
 		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
-			writeText(w, http.StatusOK, "not available")
+			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
 		}
 
@@ -644,16 +697,16 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 		var format, payment, status string
 		err := db.QueryRow("SELECT id, format, payment, status FROM submissions WHERE email=?", email).Scan(&id, &format, &payment, &status)
 		if err == sql.ErrNoRows {
-			writeText(w, http.StatusOK, "not available")
+			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
 		}
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
 		if status != "confirmed" {
-			writeText(w, http.StatusOK, "not available")
+			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
 		}
 
@@ -667,16 +720,17 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 		epcPayloadText := epcPayload(cfg.bic, cfg.ibanRecipient, cfg.iban, amount, reference)
 		epcQR, err := qrSVG(epcPayloadText, 8)
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 		weroQR, err := qrSVG(weroLinkWithAmount, 8)
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
 		data := payPageData{
+			Lang:          lang,
 			Email:         email,
 			Format:        formatName(format),
 			Amount:        amount,
@@ -700,8 +754,9 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 
 func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		lang := r.PathValue("lang")
 		if err := r.ParseForm(); err != nil {
-			writeText(w, http.StatusBadRequest, "invalid form")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_form"))
 			return
 		}
 
@@ -709,12 +764,12 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 		method := r.FormValue("method")
 
 		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
-			writeText(w, http.StatusBadRequest, "Invalid email.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_email"))
 			return
 		}
 
 		if method != "wero" && method != "iban" && method != "cash" {
-			writeText(w, http.StatusBadRequest, "Invalid method.")
+			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_method"))
 			return
 		}
 
@@ -722,21 +777,21 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 		var payment, status string
 		err := db.QueryRow("SELECT id, payment, status FROM submissions WHERE email=?", email).Scan(&id, &payment, &status)
 		if err == sql.ErrNoRows {
-			writeText(w, http.StatusOK, "not available")
+			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
 		}
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
 		if status != "confirmed" {
-			writeText(w, http.StatusOK, "not available")
+			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
 		}
 
 		if payment != "unknown" {
-			http.Redirect(w, r, "/pay?email="+url.QueryEscape(email), http.StatusFound)
+			http.Redirect(w, r, "/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
 			return
 		}
 
@@ -747,11 +802,11 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 
 		_, err = db.Exec("UPDATE submissions SET payment=? WHERE id=?", newPayment, id)
 		if err != nil {
-			writeText(w, http.StatusInternalServerError, "server error")
+			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
 
-		http.Redirect(w, r, "/pay?email="+url.QueryEscape(email), http.StatusFound)
+		http.Redirect(w, r, "/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
 	}
 }
 

@@ -53,7 +53,8 @@ func testDB(t *testing.T) *sql.DB {
 		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
 		payment TEXT NOT NULL DEFAULT 'unknown',
-		status TEXT NOT NULL DEFAULT 'confirmed'
+		status TEXT NOT NULL DEFAULT 'confirmed',
+		lang TEXT NOT NULL DEFAULT 'en'
 	)`)
 	if err != nil {
 		t.Fatalf("create schema: %v", err)
@@ -63,9 +64,13 @@ func testDB(t *testing.T) *sql.DB {
 }
 
 func mustInsert(t *testing.T, db *sql.DB, email, name, format, status string) {
+	mustInsertLang(t, db, email, name, format, status, "en")
+}
+
+func mustInsertLang(t *testing.T, db *sql.DB, email, name, format, status, lang string) {
 	t.Helper()
-	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status) VALUES (?, ?, ?, ?, ?, ?)`,
-		email, name, format, 0, time.Now().UTC().Format(time.RFC3339), status)
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, lang) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		email, name, format, 0, time.Now().UTC().Format(time.RFC3339), status, lang)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -117,9 +122,9 @@ func TestGetIndex(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/")
+	resp, err := http.Get(server.URL + "/en/")
 	if err != nil {
-		t.Fatalf("get /: %v", err)
+		t.Fatalf("get /en/: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -147,14 +152,14 @@ func TestSubmitValidDraft(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/pay") {
-		t.Fatalf("redirect = %v, want /pay?email=...", loc)
+	if loc == nil || !strings.HasPrefix(loc.Path, "/en/pay") {
+		t.Fatalf("redirect = %v, want /en/pay?email=...", loc)
 	}
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
@@ -189,7 +194,7 @@ func TestSubmitValidSealed(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "no")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
@@ -236,7 +241,7 @@ func TestSubmitValidationErrors(t *testing.T) {
 			}
 			tc.mod(form)
 			client := noRedirectClient()
-			resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+			resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -259,10 +264,10 @@ func TestSubmitDuplicateEmail(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 
-	resp, _ := http.PostForm(server.URL+"/submit", form)
+	resp, _ := http.PostForm(server.URL+"/en/submit", form)
 	resp.Body.Close()
 	client := noRedirectClient()
-	resp = postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp = postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
@@ -514,13 +519,13 @@ func TestSubmitMailerFailNotifies(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/pay") {
+	if loc == nil || !strings.HasPrefix(loc.Path, "/en/pay") {
 		t.Errorf("redirect = %v, want /pay?email=...", loc)
 	}
 	if len(mailer.sends) != 2 {
@@ -545,13 +550,13 @@ func TestSubmitMailerBothFailStillRedirects(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/pay") {
+	if loc == nil || !strings.HasPrefix(loc.Path, "/en/pay") {
 		t.Errorf("redirect = %v, want /pay?email=...", loc)
 	}
 }
@@ -574,14 +579,14 @@ func TestDraftWaitlist(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/waitlist" {
-		t.Fatalf("redirect = %v, want /waitlist", loc)
+	if loc == nil || loc.Path != "/en/waitlist" {
+		t.Fatalf("redirect = %v, want /en/waitlist", loc)
 	}
 
 	var status string
@@ -618,14 +623,14 @@ func TestSealedWaitlist(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/waitlist" {
-		t.Fatalf("redirect = %v, want /waitlist", loc)
+	if loc == nil || loc.Path != "/en/waitlist" {
+		t.Fatalf("redirect = %v, want /en/waitlist", loc)
 	}
 
 	var status string
@@ -663,14 +668,14 @@ func TestCustomCapacities(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/waitlist" {
-		t.Fatalf("redirect = %v, want /waitlist", loc)
+	if loc == nil || loc.Path != "/en/waitlist" {
+		t.Fatalf("redirect = %v, want /en/waitlist", loc)
 	}
 
 	var status string
@@ -684,8 +689,8 @@ func TestCustomCapacities(t *testing.T) {
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
 	}
-	if !strings.Contains(mailer.sends[0].body, "3 draft") {
-		t.Errorf("body missing '3 draft': %q", mailer.sends[0].body)
+	if !strings.Contains(mailer.sends[0].body, "3 Draft") {
+		t.Errorf("body missing '3 Draft': %q", mailer.sends[0].body)
 	}
 }
 
@@ -699,7 +704,7 @@ func TestSeatCountsAfterSubmissions(t *testing.T) {
 		mustInsert(t, db, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
 	}
 
-	resp, err := http.Get(server.URL + "/")
+	resp, err := http.Get(server.URL + "/en/")
 	if err != nil {
 		t.Fatalf("get /: %v", err)
 	}
@@ -719,7 +724,7 @@ func TestCancelPage(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/cancel")
+	resp, err := http.Get(server.URL + "/en/cancel")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -728,7 +733,7 @@ func TestCancelPage(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{`<input`, `action="/cancel"`} {
+	for _, want := range []string{`<input`, `action="/en/cancel"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("body missing %q", want)
 		}
@@ -746,7 +751,7 @@ func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("email", "canceler@example.com")
-	resp, err := http.PostForm(server.URL+"/cancel", form)
+	resp, err := http.PostForm(server.URL+"/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -799,7 +804,7 @@ func TestCancelConfirmedNoWaitlist(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("email", "canceler2@example.com")
-	resp, err := http.PostForm(server.URL+"/cancel", form)
+	resp, err := http.PostForm(server.URL+"/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -832,7 +837,7 @@ func TestCancelWaitlist(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("email", "waitcancel@example.com")
-	resp, err := http.PostForm(server.URL+"/cancel", form)
+	resp, err := http.PostForm(server.URL+"/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -862,7 +867,7 @@ func TestCancelUnknownEmail(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("email", "unknown@example.com")
-	resp, err := http.PostForm(server.URL+"/cancel", form)
+	resp, err := http.PostForm(server.URL+"/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -886,7 +891,7 @@ func TestCancelAlreadyCancelled(t *testing.T) {
 
 	form := url.Values{}
 	form.Set("email", "already@example.com")
-	resp, err := http.PostForm(server.URL+"/cancel", form)
+	resp, err := http.PostForm(server.URL+"/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -911,7 +916,7 @@ func TestSeatsLeftClampedAtZero(t *testing.T) {
 		mustInsert(t, db, fmt.Sprintf("overdraft%d@example.com", i), fmt.Sprintf("Over %d", i), "draft", "confirmed")
 	}
 
-	resp, err := http.Get(server.URL + "/")
+	resp, err := http.Get(server.URL + "/en/")
 	if err != nil {
 		t.Fatalf("get /: %v", err)
 	}
@@ -938,7 +943,7 @@ func TestSubmitRejectsCRLFInName(t *testing.T) {
 		form.Set("data_consent", "on")
 		form.Set("mailing_list", "yes")
 		client := noRedirectClient()
-		resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+		resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("name %q: status = %d, want %d", bad, resp.StatusCode, http.StatusBadRequest)
@@ -960,7 +965,7 @@ func TestSubmitRejectsCRLFInEmail(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -1009,7 +1014,7 @@ func TestPayPageConfirmed(t *testing.T) {
 
 	mustInsert(t, db, "draftuser@example.com", "Draft User", "draft", "confirmed")
 
-	resp, err := http.Get(server.URL + "/pay?email=draftuser@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=draftuser@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1033,7 +1038,7 @@ func TestPayPageSealed(t *testing.T) {
 
 	mustInsert(t, db, "sealeduser@example.com", "Sealed User", "sealed", "confirmed")
 
-	resp, err := http.Get(server.URL + "/pay?email=sealeduser@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=sealeduser@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1050,7 +1055,7 @@ func TestPayPageUnknownEmail(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/pay?email=nobody@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=nobody@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1072,7 +1077,7 @@ func TestPayPageWaitlist(t *testing.T) {
 
 	mustInsert(t, db, "waitlist@example.com", "Waitlist User", "draft", "waitlist")
 
-	resp, err := http.Get(server.URL + "/pay?email=waitlist@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=waitlist@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1091,7 +1096,7 @@ func TestPayPageCancelled(t *testing.T) {
 
 	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
 
-	resp, err := http.Get(server.URL + "/pay?email=cancelled@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=cancelled@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1114,7 +1119,7 @@ func TestPayPageAlreadyPaid(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	resp, err := http.Get(server.URL + "/pay?email=paid@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=paid@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1145,7 +1150,7 @@ func TestPayPageCashMarked(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	resp, err := http.Get(server.URL + "/pay?email=cash@example.com")
+	resp, err := http.Get(server.URL + "/en/pay?email=cash@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1168,13 +1173,13 @@ func TestPayMarkPaidWero(t *testing.T) {
 	form.Set("email", "weropay@example.com")
 	form.Set("method", "wero")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if !strings.HasPrefix(loc.Path, "/pay") {
+	if !strings.HasPrefix(loc.Path, "/en/pay") {
 		t.Errorf("redirect = %v, want /pay", loc)
 	}
 
@@ -1200,7 +1205,7 @@ func TestPayMarkPaidIBAN(t *testing.T) {
 	form.Set("email", "ibanpay@example.com")
 	form.Set("method", "iban")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
 	defer resp.Body.Close()
 
 	var payment string
@@ -1225,7 +1230,7 @@ func TestPayMarkCash(t *testing.T) {
 	form.Set("email", "cashpay@example.com")
 	form.Set("method", "cash")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
 	defer resp.Body.Close()
 
 	var payment string
@@ -1254,7 +1259,7 @@ func TestPayLockedAfterMark(t *testing.T) {
 	form.Set("email", "locked@example.com")
 	form.Set("method", "cash")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
 	defer resp.Body.Close()
 
 	var payment string
@@ -1278,7 +1283,7 @@ func TestPayInvalidMethod(t *testing.T) {
 	form := url.Values{}
 	form.Set("email", "invalid@example.com")
 	form.Set("method", "bogus")
-	resp, err := http.PostForm(server.URL+"/pay", form)
+	resp, err := http.PostForm(server.URL+"/en/pay", form)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -1297,12 +1302,312 @@ func TestPayInvalidEmail(t *testing.T) {
 	form := url.Values{}
 	form.Set("email", "")
 	form.Set("method", "wero")
-	resp, err := http.PostForm(server.URL+"/pay", form)
+	resp, err := http.PostForm(server.URL+"/en/pay", form)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+	}
+}
+
+func TestParseAcceptLanguage(t *testing.T) {
+	cases := []struct {
+		header string
+		want   string
+	}{
+		{"", "en"},
+		{"de", "de"},
+		{"en", "en"},
+		{"de-DE", "de"},
+		{"de-DE,de;q=0.9", "de"},
+		{"fr-FR,fr;q=0.9,en;q=0.8", "en"},
+		{"fr", "en"},
+		{"en-US,en;q=0.9", "en"},
+		{"de;q=0.5,en;q=0.9", "en"},
+		{"de;q=0.5,en;q=0.3", "de"},
+		{"es,zh,en;q=0.1", "en"},
+		{"xx-YY", "en"},
+		{"de;q=0", "en"},
+		{"de;q=0, en;q=0", "en"},
+		{"de;q=0, en;q=0.8", "en"},
+	}
+	for _, tc := range cases {
+		got := parseAcceptLanguage(tc.header)
+		if got != tc.want {
+			t.Errorf("parseAcceptLanguage(%q) = %q, want %q", tc.header, got, tc.want)
+		}
+	}
+}
+
+func TestRootRedirectsDefault(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	client := noRedirectClient()
+	resp, err := client.Get(server.URL + "/")
+	if err != nil {
+		t.Fatalf("get /: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/en/" {
+		t.Errorf("redirect = %v, want /en/", loc)
+	}
+}
+
+func TestRootRedirectsAcceptLanguage(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	req, _ := http.NewRequest("GET", server.URL+"/", nil)
+	req.Header.Set("Accept-Language", "de-DE,de;q=0.9")
+	client := noRedirectClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("get /: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/de/" {
+		t.Errorf("redirect = %v, want /de/", loc)
+	}
+}
+
+func TestRootRedirectsUnsupportedFallsBack(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	req, _ := http.NewRequest("GET", server.URL+"/", nil)
+	req.Header.Set("Accept-Language", "fr-FR")
+	client := noRedirectClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("get /: %v", err)
+	}
+	defer resp.Body.Close()
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/en/" {
+		t.Errorf("redirect = %v, want /en/", loc)
+	}
+}
+
+func TestIndexGerman(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/de/")
+	if err != nil {
+		t.Fatalf("get /de/: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Anmeldung") {
+		t.Errorf("body missing German heading: %q", string(body))
+	}
+	if strings.Contains(string(body), "Sign up") {
+		t.Errorf("body should not contain English 'Sign up': %q", string(body))
+	}
+}
+
+func TestSubmitGermanEmail(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("email", "de@example.com")
+	form.Set("name", "Deutsch User")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || !strings.HasPrefix(loc.Path, "/de/pay") {
+		t.Errorf("redirect = %v, want /de/pay?...", loc)
+	}
+	if len(mailer.sends) != 1 {
+		t.Fatalf("sends = %d, want 1", len(mailer.sends))
+	}
+	if !strings.Contains(mailer.sends[0].subject, "angemeldet") {
+		t.Errorf("subject not German: %q", mailer.sends[0].subject)
+	}
+	if !strings.Contains(mailer.sends[0].body, "/de/pay?email=") {
+		t.Errorf("body missing /de/pay link: %q", mailer.sends[0].body)
+	}
+	if !strings.Contains(mailer.sends[0].body, "/de/cancel") {
+		t.Errorf("body missing /de/cancel link: %q", mailer.sends[0].body)
+	}
+}
+
+func TestSubmitLangPersisted(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("email", "delang@example.com")
+	form.Set("name", "De Lang")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp.Body.Close()
+
+	var lang string
+	err := db.QueryRow("SELECT lang FROM submissions WHERE email=?", "delang@example.com").Scan(&lang)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if lang != "de" {
+		t.Errorf("lang = %q, want de", lang)
+	}
+}
+
+func TestPromotionUsesSignupLang(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	for i := 0; i < 24; i++ {
+		mustInsert(t, db, fmt.Sprintf("fill%d@example.com", i), fmt.Sprintf("Fill %d", i), "draft", "confirmed")
+	}
+
+	form := url.Values{}
+	form.Set("email", "dewaiter@example.com")
+	form.Set("name", "De Waiter")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp.Body.Close()
+
+	form2 := url.Values{}
+	form2.Set("email", "fill0@example.com")
+	resp2, err := http.PostForm(server.URL+"/en/cancel", form2)
+	if err != nil {
+		t.Fatalf("post cancel: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp2.StatusCode, http.StatusOK)
+	}
+
+	var promotionFound bool
+	for _, s := range mailer.sends {
+		if s.to == "dewaiter@example.com" && strings.Contains(s.subject, "angemeldet") {
+			promotionFound = true
+			if !strings.Contains(s.body, "/de/pay?email=") {
+				t.Errorf("promotion body missing /de/pay link: %q", s.body)
+			}
+		}
+	}
+	if !promotionFound {
+		t.Errorf("promotion email to waiter not found")
+	}
+}
+
+func TestCancelReceiptLocalized(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, "delang@example.com", "De Lang", "draft", "confirmed")
+
+	form := url.Values{}
+	form.Set("email", "delang@example.com")
+	resp, err := http.PostForm(server.URL+"/de/cancel", form)
+	if err != nil {
+		t.Fatalf("post cancel: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "storniert") {
+		t.Errorf("body not German: %q", string(body))
+	}
+}
+
+func TestInvalidLangRedirects(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	client := noRedirectClient()
+	resp, err := client.Get(server.URL + "/fr/waitlist")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/en/waitlist" {
+		t.Errorf("redirect = %v, want /en/waitlist", loc)
+	}
+}
+
+func TestOrganizerEmailsEnglish(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{fail: map[int]bool{0: true}}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("email", "defail@example.com")
+	form.Set("name", "De Fail")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp.Body.Close()
+
+	if len(mailer.sends) < 2 {
+		t.Fatalf("sends = %d, want >= 2", len(mailer.sends))
+	}
+	notify := mailer.sends[1]
+	if notify.to != "organizer@example.com" {
+		t.Errorf("notify to = %q, want organizer@example.com", notify.to)
+	}
+	if !strings.Contains(notify.subject, "Failed to send") {
+		t.Errorf("organizer notify subject not English: %q", notify.subject)
 	}
 }
