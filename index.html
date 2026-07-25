@@ -26,6 +26,9 @@
 		}
 		h1 { font-size: 1.5rem; margin: 0 0 0.5rem; }
 		.note { color: #555; margin: 0 0 1.5rem; }
+		.note-table { width: 100%; border-collapse: collapse; margin-bottom: 1rem; }
+		.note-table th, .note-table td { text-align: left; padding: 0.25rem 0; vertical-align: top; }
+		.note-table th { width: 5.5rem; font-weight: normal; color: #666; }
 		label { display: block; margin-top: 1rem; font-weight: 600; }
 		input[type="text"], input[type="email"] {
 			width: 100%;
@@ -56,17 +59,41 @@
 			color: #fff;
 		}
 		button:hover { background: #1d4ed8; }
+		.lang-switch {
+			display: flex;
+			justify-content: center;
+		}
+		.lang-switch button {
+			margin: 0;
+			padding: 0.5rem 0.75rem;
+			font-size: 0.875rem;
+			background: #e5e7eb;
+			color: #374151;
+		}
+		.lang-switch button:hover { background: #d1d5db; }
 	</style>
 </head>
 <body>
 	<div class="card">
+		<div class="lang-switch">
+			<a href="/{{if eq .Lang "en"}}de{{else}}en{{end}}/"><button type="button">{{if eq .Lang "en"}}Deutsch{{else}}English{{end}}</button></a>
+		</div>
 		<h1>{{T .Lang "prerelease_signup"}}</h1>
 
-		<p class="note">
-		{{T .Lang "note_what_label"}}: {{T .Lang "note_what_value"}}<br>
-		{{T .Lang "note_when_label"}}: {{T .Lang "note_when_value"}}<br>
-		{{T .Lang "note_where_label"}}: {{T .Lang "note_where_value"}} <a href="https://mtg-cube.de/hedwig-english/">{{T .Lang "note_where_link"}}</a>
-		</p>
+		<table class="note-table">
+			<tr>
+				<th>{{T .Lang "note_what_label"}}:</th>
+				<td>{{T .Lang "note_what_value"}}</td>
+			</tr>
+			<tr>
+				<th>{{T .Lang "note_when_label"}}:</th>
+				<td>{{T .Lang "note_when_value"}}</td>
+			</tr>
+			<tr>
+				<th>{{T .Lang "note_where_label"}}:</th>
+				<td>{{T .Lang "note_where_value"}} <a href="https://mtg-cube.de/hedwig-english/">{{T .Lang "note_where_link"}}</a></td>
+			</tr>
+		</table>
 
 		<form method="POST" action="/{{.Lang}}/submit">
 			<label for="email">{{T .Lang "label_email"}}</label>

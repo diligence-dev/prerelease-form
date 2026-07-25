@@ -26,7 +26,7 @@ var translations = map[string]map[string]string{
 		"waitlist_suffix":        " -> waitlist",
 		"cancellation_ack_label": "I will email magicdraftberlin@posteo.de if I cannot come or am delayed",
 		"data_consent_label":     "I consent to my data being processed for this event",
-		"mailing_list_label":     "Optional: Join Mailing list for MtG (prerelease) events",
+		"mailing_list_label":     "Optional: I want to join the mailing list for MtG (prerelease) events",
 		"button_signup":          "Sign up",
 
 		"title_pay":        "Pay for your spot",
@@ -112,7 +112,7 @@ If you no longer wish to be on the waitlist, cancel at %s/%s/cancel.
 		"waitlist_suffix":        " -> Warteliste",
 		"cancellation_ack_label": "Ich schreibe an magicdraftberlin@posteo.de, falls ich nicht kommen kann oder mich verspäte",
 		"data_consent_label":     "Ich stimme der Verarbeitung meiner Daten für diese Veranstaltung zu",
-		"mailing_list_label":     "Optional: Dem Mailverteiler für MtG (Prerelease) Events beitreten",
+		"mailing_list_label":     "Optional: Ich möchte dem Mailverteiler für MtG (Prerelease) Events beitreten",
 		"button_signup":          "Anmelden",
 
 		"title_pay":        "Bezahle deinen Platz",
