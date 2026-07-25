@@ -1,4 +1,4 @@
-app = "mtg-prerelease"
+app = "prerelease-form"
 primary_region = "fra"
 
 [build]

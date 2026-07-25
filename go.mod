@@ -1,4 +1,4 @@
-module mtg-prerelease
+module prerelease-form
 
 go 1.22
 
