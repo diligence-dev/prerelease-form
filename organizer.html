@@ -74,7 +74,7 @@
             </tr>
         </thead>
         <tbody>
-            {{range .}}<tr{{if .Italic}} class="italic"{{end}}{{if and (not .Italic) .Strike}} class="strike"{{end}}{{if and .Italic .Strike}} class="italic strike"{{end}}>
+            {{range .}}<tr{{if and (not .Strike) .Italic}} class="italic"{{end}}{{if and (not .Italic) .Strike}} class="strike"{{end}}{{if and .Italic .Strike}} class="italic strike"{{end}}>
                 <td>{{.Name}}</td>
                 <td>{{.Email}}</td>
                 <td>{{.Format}}</td>
