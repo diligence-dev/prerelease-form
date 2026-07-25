@@ -36,7 +36,7 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - `GET /waitlist` — static waitlist notice.
 - `GET /cancel` — static cancellation form.
 - `POST /cancel` — cancels by email, promotes oldest waitlister for the same format, emails promoted person and notifies organizer.
-- `GET /organizer` — Password-protected HTML table view of submissions (Basic Auth: username `admin`, password `ADMIN_TOKEN`). Shows columns: name, email, format, payment, id, status. Sorted by status (confirmed → waitlist → cancelled), then name alphabetically. Sealed rows italic, cancelled/waitlist rows strikethrough. A4 print-optimized.
+- `GET /organizer` — Password-protected HTML table view of submissions (Basic Auth: username `organizer`, password `ORGANIZER_PASSWORD`). Shows columns: name, email, format, payment, id, status. Sorted by status (confirmed → waitlist → cancelled), then name alphabetically. Sealed rows italic, cancelled/waitlist rows strikethrough. A4 print-optimized.
 - `GET /organizer?export=csv` — Same auth as HTML view, exports CSV with columns: id, email, name, format, mailing_list, created_at, payment, status.
 - `GET /health` — returns "ok".
 
@@ -44,7 +44,7 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 All configuration is resolved once at startup into a `config` struct via `loadConfig()`; handlers receive `cfg` and never read `os.Getenv` per-request. Missing required values are fatal at startup.
 
 Required environment variables / Fly secrets:
-- `ADMIN_TOKEN` — protects `/submissions.csv`.
+- `ORGANIZER_PASSWORD` — protects `/submissions.csv`.
 - `SMTP_PASSWORD` — for `smtp.web.de` auth.
 - `WERO_EMAIL` — shown on payment page.
 - `WERO_LINK` — payment link in Wero QR, also shown on payment page.

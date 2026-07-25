@@ -45,15 +45,15 @@ func (m smtpMailer) Send(to, subject, body string) error {
 // config holds runtime configuration resolved once at startup so handlers
 // never read os.Getenv directly and required values are validated up front.
 type config struct {
-	weroEmail      string
-	weroLink       string
-	iban           string
-	ibanRecipient  string
-	bic            string
-	organizerEmail string
-	adminToken     string
-	draftCap       int
-	sealedCap      int
+	weroEmail         string
+	weroLink          string
+	iban              string
+	ibanRecipient     string
+	bic               string
+	organizerEmail    string
+	organizerPassword string
+	draftCap          int
+	sealedCap         int
 }
 
 // loadConfig reads configuration from the environment and validates required
@@ -61,15 +61,15 @@ type config struct {
 // boots into a state where payment/organizer emails would silently be empty.
 func loadConfig() config {
 	cfg := config{
-		weroEmail:      os.Getenv("WERO_EMAIL"),
-		weroLink:       os.Getenv("WERO_LINK"),
-		iban:           os.Getenv("IBAN"),
-		ibanRecipient:  os.Getenv("IBAN_RECIPIENT"),
-		bic:            os.Getenv("BIC"),
-		organizerEmail: getenv("ORGANIZER_EMAIL", "diligence.dev@web.de"),
-		adminToken:     os.Getenv("ADMIN_TOKEN"),
-		draftCap:       getenvInt("CAPACITY_DRAFT", 24),
-		sealedCap:      getenvInt("CAPACITY_SEALED", 8),
+		weroEmail:         os.Getenv("WERO_EMAIL"),
+		weroLink:          os.Getenv("WERO_LINK"),
+		iban:              os.Getenv("IBAN"),
+		ibanRecipient:     os.Getenv("IBAN_RECIPIENT"),
+		bic:               os.Getenv("BIC"),
+		organizerEmail:    getenv("ORGANIZER_EMAIL", "diligence.dev@web.de"),
+		organizerPassword: os.Getenv("ORGANIZER_PASSWORD"),
+		draftCap:          getenvInt("CAPACITY_DRAFT", 24),
+		sealedCap:         getenvInt("CAPACITY_SEALED", 8),
 	}
 	if cfg.weroEmail == "" {
 		log.Fatalf("WERO_EMAIL not set")
@@ -89,8 +89,8 @@ func loadConfig() config {
 	if cfg.organizerEmail == "" {
 		log.Fatalf("ORGANIZER_EMAIL not set")
 	}
-	if cfg.adminToken == "" {
-		log.Fatalf("ADMIN_TOKEN not set")
+	if cfg.organizerPassword == "" {
+		log.Fatalf("ORGANIZER_PASSWORD not set")
 	}
 	return cfg
 }
@@ -417,7 +417,7 @@ type organizerRow struct {
 func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, pass, ok := r.BasicAuth()
-		if !ok || user != "admin" || subtle.ConstantTimeCompare([]byte(pass), []byte(cfg.adminToken)) != 1 {
+		if !ok || user != "organizer" || subtle.ConstantTimeCompare([]byte(pass), []byte(cfg.organizerPassword)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Basic realm="organizer"`)
 			writeText(w, http.StatusUnauthorized, "Unauthorized")
 			return

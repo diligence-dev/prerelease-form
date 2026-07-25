@@ -73,15 +73,15 @@ func mustInsert(t *testing.T, db *sql.DB, email, name, format, status string) {
 
 func testConfig() config {
 	return config{
-		weroEmail:      "wero@example.com",
-		weroLink:       "https://wero.example.com/pay",
-		iban:           "DE1234567890",
-		ibanRecipient:  "Test Recipient",
-		bic:            "GENODEM1GLS",
-		organizerEmail: "organizer@example.com",
-		adminToken:     "secret-token",
-		draftCap:       24,
-		sealedCap:      8,
+		weroEmail:         "wero@example.com",
+		weroLink:          "https://wero.example.com/pay",
+		iban:              "DE1234567890",
+		ibanRecipient:     "Test Recipient",
+		bic:               "GENODEM1GLS",
+		organizerEmail:    "organizer@example.com",
+		organizerPassword: "secret-token",
+		draftCap:          24,
+		sealedCap:         8,
 	}
 }
 
@@ -300,7 +300,7 @@ func TestOrganizerWrongPassword(t *testing.T) {
 	defer server.Close()
 
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("admin", "wrong")
+	req.SetBasicAuth("organizer", "wrong")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -338,7 +338,7 @@ func TestOrganizerCorrectPassword(t *testing.T) {
 	mustInsert(t, db, "test@example.com", "Test User", "draft", "confirmed")
 
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("admin", "secret-token")
+	req.SetBasicAuth("organizer", "secret-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -371,7 +371,7 @@ func TestOrganizerSortedByStatusThenName(t *testing.T) {
 	mustInsert(t, db, "confirm2@example.com", "Bob Confirmed", "draft", "confirmed")
 
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("admin", "secret-token")
+	req.SetBasicAuth("organizer", "secret-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -409,7 +409,7 @@ func TestOrganizerRowStyling(t *testing.T) {
 	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
 
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("admin", "secret-token")
+	req.SetBasicAuth("organizer", "secret-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -434,7 +434,7 @@ func TestOrganizerCSVExport(t *testing.T) {
 	mustInsert(t, db, "csvtest@example.com", "CSV Test", "draft", "confirmed")
 
 	req, _ := http.NewRequest("GET", server.URL+"/organizer?export=csv", nil)
-	req.SetBasicAuth("admin", "secret-token")
+	req.SetBasicAuth("organizer", "secret-token")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
