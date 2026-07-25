@@ -352,7 +352,7 @@ Thanks for signing up for %s.
 All %s seats are currently taken, so you've been added to the waitlist.
 You'll receive another email with payment details as soon as a seat opens up for you.
 
-If you no longer wish to be on the waitlist, cancel at %s/cancel using your email address.
+If you no longer wish to be on the waitlist, cancel at %s/cancel.
 `, name, formatName(format), seatTotal(format, cap), host)
 		}
 
@@ -393,7 +393,7 @@ func confirmationEmailBody(name, format, email, host string) string {
 	return fmt.Sprintf(`Hi %s,
 
 you are signed up for the prerelease - you will be playing %s!
-Pay for your spot here: %s/pay?email=%s
+If you haven't already, pay for your spot here: %s/pay?email=%s
 If you can no longer attend, cancel at %s/cancel.
 Looking forward to seeing you at the event!
 `, name, formatName(format), host, url.QueryEscape(email), host)
