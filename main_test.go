@@ -1611,3 +1611,26 @@ func TestOrganizerEmailsEnglish(t *testing.T) {
 		t.Errorf("organizer notify subject not English: %q", notify.subject)
 	}
 }
+
+func TestBuildMessageHeadersAndEncoding(t *testing.T) {
+	msg := string(buildMessage("from@example.com", "to@example.com",
+		"Prerelease – Du bist angemeldet", "Hallo äöüß, Plaetze frei.\r\n"))
+
+	if !strings.Contains(msg, "Content-Type: text/plain; charset=utf-8\r\n") {
+		t.Errorf("missing Content-Type with utf-8 charset:\n%s", msg)
+	}
+	if !strings.Contains(msg, "Content-Transfer-Encoding: 8bit\r\n") {
+		t.Errorf("missing Content-Transfer-Encoding: 8bit:\n%s", msg)
+	}
+	// Non-ASCII subject must be RFC 2047 encoded, not emitted as raw bytes.
+	if strings.Contains(msg, "Subject: Prerelease – Du") {
+		t.Errorf("subject not RFC 2047 encoded (raw non-ASCII in header):\n%s", msg)
+	}
+	if !strings.Contains(msg, "Subject: =?utf-8") {
+		t.Errorf("subject missing =?utf-8 encoded-word:\n%s", msg)
+	}
+	// Body must be unchanged (8bit transport allows raw UTF-8 in body).
+	if !strings.Contains(msg, "\r\nHallo äöüß, Plaetze frei.\r\n") {
+		t.Errorf("body not preserved verbatim:\n%s", msg)
+	}
+}

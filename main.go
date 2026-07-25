@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"mime"
 	"net/http"
 	"net/smtp"
 	"net/url"
@@ -32,14 +33,20 @@ type smtpMailer struct {
 }
 
 func (m smtpMailer) Send(to, subject, body string) error {
-	msg := []byte("From: " + m.from + "\r\n" +
-		"To: " + to + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"\r\n" +
-		body + "\r\n")
+	msg := buildMessage(m.from, to, subject, body)
 	addr := m.host + ":" + m.port
 	auth := smtp.PlainAuth("", m.user, m.password, m.host)
 	return smtp.SendMail(addr, auth, m.from, []string{to}, msg)
+}
+
+func buildMessage(from, to, subject, body string) []byte {
+	return []byte("From: " + from + "\r\n" +
+		"To: " + to + "\r\n" +
+		"Subject: " + mime.QEncoding.Encode("utf-8", subject) + "\r\n" +
+		"Content-Type: text/plain; charset=utf-8\r\n" +
+		"Content-Transfer-Encoding: 8bit\r\n" +
+		"\r\n" +
+		body + "\r\n")
 }
 
 // config holds runtime configuration resolved once at startup so handlers

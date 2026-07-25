@@ -77,8 +77,8 @@ var translations = map[string]map[string]string{
 		"msg_waitlist_cancelled":     "Your waitlist spot has been cancelled.",
 		"msg_invalid_method":         "Invalid method.",
 
-		"subject_confirmed": "Prerelease – You're signed up",
-		"subject_waitlist":  "Prerelease – You're on the waitlist",
+		"subject_confirmed": "Prerelease - You're signed up",
+		"subject_waitlist":  "Prerelease - You're on the waitlist",
 
 		"body_confirmed": `Hi %s,
 
@@ -163,8 +163,8 @@ If you no longer wish to be on the waitlist, cancel at %s/%s/cancel.
 		"msg_waitlist_cancelled":     "Dein Wartelistenplatz wurde storniert.",
 		"msg_invalid_method":         "Ungültige Methode.",
 
-		"subject_confirmed": "Prerelease – Du bist angemeldet",
-		"subject_waitlist":  "Prerelease – Du bist auf der Warteliste",
+		"subject_confirmed": "Prerelease - Du bist angemeldet",
+		"subject_waitlist":  "Prerelease - Du bist auf der Warteliste",
 
 		"body_confirmed": `Hallo %s,
 

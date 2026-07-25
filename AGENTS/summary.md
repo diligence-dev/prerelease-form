@@ -5,7 +5,7 @@ Single-binary Go web app for signing up to a Magic: The Gathering prerelease.
 Submissions are stored in SQLite and exportable as CSV. Payment is manual via Wero, IBAN, or cash; payment is tracked in database, users confirm payment.
 
 ## Stack
-- Go 1.22 stdlib for HTTP, templates, CSV, SMTP (`net/smtp`), and embedding.
+- Go 1.22 stdlib for HTTP, templates, CSV, SMTP (`net/smtp`), MIME (`mime.QEncoding` for RFC 2047 subject encoding), and embedding.
 - `modernc.org/sqlite` for pure-Go SQLite (no CGO).
 - `github.com/yeqown/go-qrcode/v2` for inline SVG QR code generation (EPC QR for SEPA, Wero QR).
 - `html/template` for all pages with i18n support via `T()` FuncMap.
@@ -48,6 +48,7 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - Root URL (`/`) redirects based on `Accept-Language` header via stdlib-only parser.
 - Invalid lang prefix redirects to `/en/...`.
 - User-facing pages, forms, and emails are localized.
+- Emails are MIME-encoded for UTF-8: `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 8bit`, and non-ASCII subjects are RFC 2047 encoded via `mime.QEncoding.Encode` (so German umlauts and the en-dash in subjects render correctly in all mail clients).
 - Waitlist/promotion emails use the waiter's signup language.
 - Organizer-facing emails (failure notifications, cancel notices) are always in English.
 - Database stores `lang` column per submission for email language tracking.
