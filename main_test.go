@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
@@ -278,63 +279,103 @@ func TestSubmitDuplicateEmail(t *testing.T) {
 	}
 }
 
-func TestOrganizerMissingAuth(t *testing.T) {
+// loginAsOrganizer posts the login form with the given credentials and returns
+// the response plus the Set-Cookie header value (empty if none). Does not
+// follow redirects.
+func loginAsOrganizer(t *testing.T, server *httptest.Server, username, password string) (*http.Response, string) {
+	t.Helper()
+	client := noRedirectClient()
+	form := url.Values{}
+	form.Set("username", username)
+	form.Set("password", password)
+	resp, err := client.PostForm(server.URL+"/organizer/login", form)
+	if err != nil {
+		t.Fatalf("login post: %v", err)
+	}
+	return resp, resp.Header.Get("Set-Cookie")
+}
+
+func TestOrganizerMissingAuthRedirectsToLogin(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	resp, err := http.DefaultClient.Do(req)
+	client := noRedirectClient()
+	resp, err := client.Get(server.URL + "/organizer")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
-	if wwwAuth := resp.Header.Get("WWW-Authenticate"); wwwAuth == "" {
-		t.Errorf("WWW-Authenticate header missing")
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/organizer/login" {
+		t.Errorf("redirect = %v, want /organizer/login", loc)
 	}
 }
 
-func TestOrganizerWrongPassword(t *testing.T) {
+func TestOrganizerLoginWrongPassword(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("organizer", "wrong")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	resp, setCookie := loginAsOrganizer(t, server, "organizer", "wrong")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
+	if setCookie != "" {
+		t.Errorf("Set-Cookie should be empty on failed login, got %q", setCookie)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "invalid") {
+		t.Errorf("body should contain error message, got: %q", string(body))
+	}
 }
 
-func TestOrganizerWrongUsername(t *testing.T) {
+func TestOrganizerLoginWrongUsername(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("wrong", "secret-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	resp, _ := loginAsOrganizer(t, server, "wrong", "secret-token")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
 	}
 }
 
-func TestOrganizerCorrectPassword(t *testing.T) {
+func TestOrganizerLoginCorrectPasswordSetsCookie(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	if setCookie == "" {
+		t.Fatalf("Set-Cookie missing on successful login")
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/organizer" {
+		t.Errorf("redirect = %v, want /organizer", loc)
+	}
+	if !strings.Contains(setCookie, "HttpOnly") {
+		t.Errorf("cookie not HttpOnly: %q", setCookie)
+	}
+	if !strings.Contains(setCookie, "organizer_session=") {
+		t.Errorf("cookie name missing: %q", setCookie)
+	}
+}
+
+func TestOrganizerCookieGrantsAccess(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
@@ -342,9 +383,16 @@ func TestOrganizerCorrectPassword(t *testing.T) {
 
 	mustInsert(t, db, "test@example.com", "Test User", "draft", "confirmed")
 
+	_, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
+	if setCookie == "" {
+		t.Fatalf("login did not set cookie")
+	}
+
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("organizer", "secret-token")
-	resp, err := http.DefaultClient.Do(req)
+	req.Header.Set("Cookie", setCookie)
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -363,6 +411,57 @@ func TestOrganizerCorrectPassword(t *testing.T) {
 	}
 }
 
+func TestOrganizerCookieTamperedRejected(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	// Tamper: valid format but wrong signature.
+	tampered := "organizer_session=AAAA.BBBB"
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.Header.Set("Cookie", tampered)
+	client := noRedirectClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want redirect", resp.StatusCode)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/organizer/login" {
+		t.Errorf("redirect = %v, want /organizer/login", loc)
+	}
+}
+
+func TestOrganizerCookieExpiredRejected(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	// Build an expired cookie using the production helper with a past expiry.
+	cfg := testConfig()
+	expired := makeSessionCookie(cfg, time.Now().Add(-1*time.Hour))
+	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req.AddCookie(expired)
+	client := noRedirectClient()
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want redirect", resp.StatusCode)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/organizer/login" {
+		t.Errorf("redirect = %v, want /organizer/login", loc)
+	}
+}
+
 func TestOrganizerSortedByStatusThenName(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
@@ -375,12 +474,7 @@ func TestOrganizerSortedByStatusThenName(t *testing.T) {
 	mustInsert(t, db, "confirm1@example.com", "Alice Confirmed", "draft", "confirmed")
 	mustInsert(t, db, "confirm2@example.com", "Bob Confirmed", "draft", "confirmed")
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("organizer", "secret-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	resp := authedOrganizerGet(t, server, "")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
@@ -404,6 +498,23 @@ func TestOrganizerSortedByStatusThenName(t *testing.T) {
 	}
 }
 
+// authedOrganizerGet performs a GET /organizer[?query] after logging in,
+// returning the authenticated response.
+func authedOrganizerGet(t *testing.T, server *httptest.Server, query string) *http.Response {
+	t.Helper()
+	_, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
+	if setCookie == "" {
+		t.Fatalf("login did not set cookie")
+	}
+	req, _ := http.NewRequest("GET", server.URL+"/organizer"+query, nil)
+	req.Header.Set("Cookie", setCookie)
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	return resp
+}
+
 func TestOrganizerRowStyling(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
@@ -413,12 +524,7 @@ func TestOrganizerRowStyling(t *testing.T) {
 	mustInsert(t, db, "sealed@example.com", "Sealed User", "sealed", "confirmed")
 	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
-	req.SetBasicAuth("organizer", "secret-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	resp := authedOrganizerGet(t, server, "")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
@@ -436,14 +542,9 @@ func TestOrganizerCSVExport(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "csvtest@example.com", "CSV Test", "draft", "confirmed")
+	mustInsertLang(t, db, "csvtest@example.com", "CSV Test", "draft", "confirmed", "de")
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer?export=csv", nil)
-	req.SetBasicAuth("organizer", "secret-token")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
+	resp := authedOrganizerGet(t, server, "?export=csv")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -466,6 +567,15 @@ func TestOrganizerCSVExport(t *testing.T) {
 	if rows[0][0] != "id" || rows[0][1] != "email" || rows[0][2] != "name" {
 		t.Errorf("header mismatch: %v", rows[0])
 	}
+	if len(rows[0]) != 9 {
+		t.Errorf("header column count = %d, want 9", len(rows[0]))
+	}
+	if rows[0][8] != "lang" {
+		t.Errorf("9th header = %q, want lang", rows[0][8])
+	}
+	if rows[1][8] != "de" {
+		t.Errorf("lang value = %q, want de", rows[1][8])
+	}
 }
 
 func TestOrganizerCSVExportRequiresAuth(t *testing.T) {
@@ -474,14 +584,18 @@ func TestOrganizerCSVExportRequiresAuth(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	req, _ := http.NewRequest("GET", server.URL+"/organizer?export=csv", nil)
-	resp, err := http.DefaultClient.Do(req)
+	client := noRedirectClient()
+	resp, err := client.Get(server.URL + "/organizer?export=csv")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/organizer/login" {
+		t.Errorf("redirect = %v, want /organizer/login", loc)
 	}
 }
 

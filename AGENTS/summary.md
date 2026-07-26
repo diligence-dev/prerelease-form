@@ -19,6 +19,8 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - `pay.html` — payment page with 3 options (Wero, IBAN, cash), inline SVG QRs, confirmation after payment recorded, i18n.
 - `waitlist.html` — waitlist notice page with i18n.
 - `cancel.html` — self-serve cancellation form with i18n.
+- `organizer.html` — server-side template for the password-protected submissions table view (English only, A4 print-optimized).
+- `organizer_login.html` — login form for `/organizer` (username + password, English only). Browser autofill-friendly so password managers save and fill credentials; on success sets a persistent 30-day session cookie.
 - All HTML pages share a centered card layout (inline styles); no shared CSS file.
 - `main_test.go` — table-driven tests with a fake `Mailer` and temp database.
 - `go.mod` / `go.sum` — Go module files.
@@ -38,8 +40,10 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 - `GET /{lang}/waitlist` — waitlist notice, localized.
 - `GET /{lang}/cancel` — cancellation form, localized.
 - `POST /{lang}/cancel` — cancels by email, promotes oldest waitlister for the same format, emails promoted person (in waiter's signup language) and notifies organizer (always English).
-- `GET /organizer` — Password-protected HTML table view of submissions (Basic Auth: username `organizer`, password `ORGANIZER_PASSWORD`). Shows columns: name, email, format, payment, id, status. Sorted by status (confirmed → waitlist → cancelled), then name alphabetically. Sealed rows italic, cancelled/waitlist rows strikethrough. A4 print-optimized. (English only)
-- `GET /organizer?export=csv` — Same auth as HTML view, exports CSV with columns: id, email, name, format, mailing_list, created_at, payment, status.
+- `GET /organizer` — Session-cookie-protected HTML table view of submissions. Unauthenticated requests redirect to `/organizer/login`. Cookie is HMAC-SHA256 signed with a key derived from `ORGANIZER_PASSWORD` (via SHA-256), valid for 30 days (`HttpOnly; Secure; SameSite=Strict; Path=/organizer`). Shows columns: name, email, format, payment, id, status. Sorted by status (confirmed → waitlist → cancelled), then name alphabetically. Sealed rows italic, cancelled/waitlist rows strikethrough. A4 print-optimized. (English only)
+- `GET /organizer/login` — login form (username pre-filled `organizer`, password field with `autocomplete="current-password"` for password-manager autofill).
+- `POST /organizer/login` — verifies `username` == `organizer` and `password` == `ORGANIZER_PASSWORD` (constant-time compare); on success sets session cookie and redirects to `/organizer`, on failure re-renders form with error (401).
+- `GET /organizer?export=csv` — Same auth as HTML view, exports CSV with ALL columns from database.
 - `GET /health` — returns "ok".
 
 ## Internationalization (i18n)
@@ -58,7 +62,7 @@ Submissions are stored in SQLite and exportable as CSV. Payment is manual via We
 All configuration is resolved once at startup into a `config` struct via `loadConfig()`; handlers receive `cfg` and never read `os.Getenv` per-request. Missing required values are fatal at startup.
 
 Required environment variables / Fly secrets:
-- `ORGANIZER_PASSWORD` — protects `/submissions.csv`.
+- `ORGANIZER_PASSWORD` — required to log in at `/organizer/login`; also derives the HMAC signing key for the 30-day session cookie (via SHA-256). Rotating it invalidates all existing session cookies.
 - `SMTP_PASSWORD` — for `smtp.web.de` auth.
 - `WERO_EMAIL` — shown on payment page.
 - `WERO_LINK` — payment link in Wero QR, also shown on payment page.

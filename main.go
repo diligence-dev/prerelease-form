@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/csv"
 	"fmt"
 	"html/template"
@@ -21,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed index.html pay.html waitlist.html cancel.html organizer.html
+//go:embed index.html pay.html waitlist.html cancel.html organizer.html organizer_login.html
 var embeddedFiles embed.FS
 
 type Mailer interface {
@@ -202,6 +205,10 @@ func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) 
 	if err != nil {
 		return nil, err
 	}
+	organizerLoginTmpl, err := template.New("organizer_login.html").Funcs(funcMap).ParseFS(embeddedFiles, "organizer_login.html")
+	if err != nil {
+		return nil, err
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", rootRedirectHandler())
@@ -213,6 +220,8 @@ func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) 
 	mux.HandleFunc("GET /{lang}/cancel", localizedHandler(cancelFormHandler(cancelTmpl)))
 	mux.HandleFunc("POST /{lang}/cancel", localizedHandler(cancelHandler(db, mailer, cfg)))
 	mux.HandleFunc("GET /organizer", organizerHandler(db, organizerTmpl, cfg))
+	mux.HandleFunc("GET /organizer/login", organizerLoginHandler(organizerLoginTmpl))
+	mux.HandleFunc("POST /organizer/login", organizerLoginPostHandler(cfg, organizerLoginTmpl))
 	mux.HandleFunc("GET /health", healthHandler)
 	return mux, nil
 }
@@ -470,16 +479,99 @@ type organizerRow struct {
 	Strike  bool
 }
 
+const sessionCookieName = "organizer_session"
+const sessionMaxAge = 30 * 24 * time.Hour
+
+// sessionKey derives a fixed-length HMAC key from the organizer password so
+// the signing key has full entropy regardless of password length.
+func sessionKey(cfg config) []byte {
+	sum := sha256.Sum256([]byte(cfg.organizerPassword))
+	return sum[:]
+}
+
+// makeSessionCookie builds a signed cookie authenticating the organizer until
+// expiry. The cookie value is "<expiryUnix>.<base64url(hmac-sha256(key, expiryUnix))>".
+func makeSessionCookie(cfg config, expiry time.Time) *http.Cookie {
+	expiryStr := strconv.FormatInt(expiry.Unix(), 10)
+	mac := hmac.New(sha256.New, sessionKey(cfg))
+	mac.Write([]byte(expiryStr))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	value := expiryStr + "." + sig
+	return &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    value,
+		Path:     "/organizer",
+		MaxAge:   int(sessionMaxAge.Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	}
+}
+
+// validSession reports whether the request carries a valid, unexpired
+// session cookie signed with the organizer password.
+func validSession(r *http.Request, cfg config) bool {
+	c, err := r.Cookie(sessionCookieName)
+	if err != nil {
+		return false
+	}
+	expiryStr, sig, ok := strings.Cut(c.Value, ".")
+	if !ok {
+		return false
+	}
+	mac := hmac.New(sha256.New, sessionKey(cfg))
+	mac.Write([]byte(expiryStr))
+	want := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if subtle.ConstantTimeCompare([]byte(sig), []byte(want)) != 1 {
+		return false
+	}
+	expiry, err := strconv.ParseInt(expiryStr, 10, 64)
+	if err != nil {
+		return false
+	}
+	return time.Unix(expiry, 0).After(time.Now())
+}
+
+type loginPageData struct {
+	Error string
+}
+
+func organizerLoginHandler(tmpl *template.Template) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := tmpl.Execute(w, loginPageData{}); err != nil {
+			log.Printf("organizer login template execute: %v", err)
+		}
+	}
+}
+
+func organizerLoginPostHandler(cfg config, tmpl *template.Template) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			writeText(w, http.StatusBadRequest, "bad form")
+			return
+		}
+		user := r.FormValue("username")
+		pass := r.FormValue("password")
+		if user != "organizer" || subtle.ConstantTimeCompare([]byte(pass), []byte(cfg.organizerPassword)) != 1 {
+			w.WriteHeader(http.StatusUnauthorized)
+			if err := tmpl.Execute(w, loginPageData{Error: "invalid credentials"}); err != nil {
+				log.Printf("organizer login template execute: %v", err)
+			}
+			return
+		}
+		http.SetCookie(w, makeSessionCookie(cfg, time.Now().Add(sessionMaxAge)))
+		http.Redirect(w, r, "/organizer", http.StatusFound)
+	}
+}
+
 func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != "organizer" || subtle.ConstantTimeCompare([]byte(pass), []byte(cfg.organizerPassword)) != 1 {
-			w.Header().Set("WWW-Authenticate", `Basic realm="organizer"`)
-			writeText(w, http.StatusUnauthorized, "Unauthorized")
+		if !validSession(r, cfg) {
+			http.Redirect(w, r, "/organizer/login", http.StatusFound)
 			return
 		}
 
-		rows, err := db.Query(`SELECT id, email, name, format, mailing_list, created_at, payment, status
+		rows, err := db.Query(`SELECT id, email, name, format, mailing_list, created_at, payment, status, lang
 			FROM submissions
 			ORDER BY CASE status
 				WHEN 'confirmed' THEN 0
@@ -497,14 +589,14 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 			w.Header().Set("Content-Type", "text/csv")
 			w.Header().Set("Content-Disposition", "attachment; filename=\"submissions.csv\"")
 			writer := csv.NewWriter(w)
-			if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status"}); err != nil {
+			if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status", "lang"}); err != nil {
 				log.Printf("csv write header: %v", err)
 				return
 			}
 			for rows.Next() {
 				var id, mailingList int
-				var email, name, format, createdAt, payment, status string
-				if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status); err != nil {
+				var email, name, format, createdAt, payment, status, lang string
+				if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status, &lang); err != nil {
 					log.Printf("csv scan row: %v", err)
 					return
 				}
@@ -517,6 +609,7 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 					createdAt,
 					payment,
 					status,
+					lang,
 				}); err != nil {
 					log.Printf("csv write row: %v", err)
 					return
@@ -532,8 +625,8 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 		var organizerRows []organizerRow
 		for rows.Next() {
 			var id, mailingList int
-			var email, name, format, createdAt, payment, status string
-			if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status); err != nil {
+			var email, name, format, createdAt, payment, status, lang string
+			if err := rows.Scan(&id, &email, &name, &format, &mailingList, &createdAt, &payment, &status, &lang); err != nil {
 				log.Printf("organizer scan row: %v", err)
 				return
 			}
