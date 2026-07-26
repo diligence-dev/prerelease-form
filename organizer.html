@@ -31,6 +31,10 @@
         .no-print a:hover {
             background: #bbb;
         }
+        .no-print span {
+            margin-left: 1em;
+            vertical-align: middle;
+        }
         table {
             width: 100%;
             border-collapse: collapse;
@@ -61,6 +65,8 @@
 <body>
     <div class="no-print">
         <a href="/organizer?export=csv">Export CSV</a>
+        <span>{{.DraftCount}}/{{.DraftCapacity}} draft</span>
+        <span>{{.SealedCount}}/{{.SealedCapacity}} sealed</span>
     </div>
     <table>
         <thead>
@@ -74,7 +80,7 @@
             </tr>
         </thead>
         <tbody>
-            {{range .}}<tr{{if and (not .Strike) .Italic}} class="italic"{{end}}{{if and (not .Italic) .Strike}} class="strike"{{end}}{{if and .Italic .Strike}} class="italic strike"{{end}}>
+            {{range .Rows}}<tr{{if and (not .Strike) .Italic}} class="italic"{{end}}{{if and (not .Italic) .Strike}} class="strike"{{end}}{{if and .Italic .Strike}} class="italic strike"{{end}}>
                 <td>{{.Name}}</td>
                 <td>{{.Email}}</td>
                 <td>{{.Format}}</td>

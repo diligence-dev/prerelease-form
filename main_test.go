@@ -498,6 +498,37 @@ func TestOrganizerSortedByStatusThenName(t *testing.T) {
 	}
 }
 
+func TestOrganizerCapacityCounts(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	// Draft: 3 confirmed + 1 waitlist + 1 cancelled (cancelled excluded).
+	mustInsert(t, db, "d1@example.com", "Draft One", "draft", "confirmed")
+	mustInsert(t, db, "d2@example.com", "Draft Two", "draft", "confirmed")
+	mustInsert(t, db, "d3@example.com", "Draft Three", "draft", "confirmed")
+	mustInsert(t, db, "dw@example.com", "Draft Wait", "draft", "waitlist")
+	mustInsert(t, db, "dc@example.com", "Draft Cancel", "draft", "cancelled")
+	// Sealed: 2 confirmed + 1 waitlist + 1 cancelled.
+	mustInsert(t, db, "s1@example.com", "Sealed One", "sealed", "confirmed")
+	mustInsert(t, db, "s2@example.com", "Sealed Two", "sealed", "confirmed")
+	mustInsert(t, db, "sw@example.com", "Sealed Wait", "sealed", "waitlist")
+	mustInsert(t, db, "sc@example.com", "Sealed Cancel", "sealed", "cancelled")
+
+	resp := authedOrganizerGet(t, server, "")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	// (signed-up + waitlist)/capacity per format: draft 4/24, sealed 3/8.
+	if !strings.Contains(string(body), "4/24 draft") {
+		t.Errorf("body missing '4/24 draft': %q", string(body))
+	}
+	if !strings.Contains(string(body), "3/8 sealed") {
+		t.Errorf("body missing '3/8 sealed': %q", string(body))
+	}
+}
+
 // authedOrganizerGet performs a GET /organizer[?query] after logging in,
 // returning the authenticated response.
 func authedOrganizerGet(t *testing.T, server *httptest.Server, query string) *http.Response {

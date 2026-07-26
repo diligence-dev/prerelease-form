@@ -479,6 +479,25 @@ type organizerRow struct {
 	Strike  bool
 }
 
+// organizerPageData wraps the submission rows with per-format seat counts
+// shown next to the export button. Counted covers confirmed plus waitlist
+// (cancelled rows excluded); Capacity is the configured seat cap.
+type organizerPageData struct {
+	Rows           []organizerRow
+	DraftCount     int
+	DraftCapacity  int
+	SealedCount    int
+	SealedCapacity int
+}
+
+// signupCount returns the number of confirmed plus waitlist submissions for
+// the given format (cancelled rows excluded).
+func signupCount(db *sql.DB, format string) (int, error) {
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND status IN ('confirmed','waitlist')", format).Scan(&count)
+	return count, err
+}
+
 const sessionCookieName = "organizer_session"
 const sessionMaxAge = 30 * 24 * time.Hour
 
@@ -642,8 +661,27 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 			})
 		}
 
+		draftCount, err := signupCount(db, "draft")
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+		sealedCount, err := signupCount(db, "sealed")
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+
+		data := organizerPageData{
+			Rows:           organizerRows,
+			DraftCount:     draftCount,
+			DraftCapacity:  cfg.draftCap,
+			SealedCount:    sealedCount,
+			SealedCapacity: cfg.sealedCap,
+		}
+
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, organizerRows); err != nil {
+		if err := tmpl.Execute(w, data); err != nil {
 			log.Printf("organizer template execute: %v", err)
 		}
 	}
