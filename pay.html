@@ -69,10 +69,10 @@
 				<p class="method-info">{{T .Lang "or_manually"}}</p>
 				<table class="method-info">
 					<tr><td>{{T .Lang "label_recipient"}}</td><td>{{.WeroEmail}}</td></tr>
-					<tr><td>{{T .Lang "label_amount"}}</td><td>€{{.Amount}}</td></tr>
-					<tr><td>{{T .Lang "label_message"}}</td><td>{{.Reference}}</td></tr>
+				<tr><td>{{T .Lang "label_amount"}}</td><td>€{{printf "%.2f" .Amount}}</td></tr>
+				<tr><td>{{T .Lang "label_message"}}</td><td>{{.Reference}}</td></tr>
 				</table>
-				<form method="POST" action="/{{.Lang}}/pay">
+				<form method="POST" action="/{{.SetCode}}/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="wero">
 					<button type="submit">{{T .Lang "button_paid"}}</button>
@@ -89,10 +89,10 @@
 					<tr><td>{{T .Lang "label_recipient"}}</td><td>{{.IBANRecipient}}</td></tr>
 					<tr><td>{{T .Lang "label_iban"}}</td><td>{{.IBAN}}</td></tr>
 					<tr><td>{{T .Lang "label_bic"}}</td><td>{{.BIC}}</td></tr>
-					<tr><td>{{T .Lang "label_amount"}}</td><td>€{{.Amount}}</td></tr>
+					<tr><td>{{T .Lang "label_amount"}}</td><td>€{{printf "%.2f" .Amount}}</td></tr>
 					<tr><td>{{T .Lang "label_reference"}}</td><td>{{.Reference}}</td></tr>
 				</table>
-				<form method="POST" action="/{{.Lang}}/pay">
+				<form method="POST" action="/{{.SetCode}}/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="iban">
 					<button type="submit">{{T .Lang "button_paid"}}</button>
@@ -104,7 +104,7 @@
 			<summary>{{T .Lang "summary_cash"}}</summary>
 			<div class="content">
 				<p class="method-info">{{T .Lang "cash_info"}}</p>
-				<form method="POST" action="/{{.Lang}}/pay">
+				<form method="POST" action="/{{.SetCode}}/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
 					<input type="hidden" name="method" value="cash">
 					<button type="submit">{{T .Lang "button_cash"}}</button>

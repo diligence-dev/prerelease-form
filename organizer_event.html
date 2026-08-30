@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prerelease — {{.Event.SetCode}}</title>
+    <style>
+        @page { size: A4 portrait; margin: 1.5cm }
+        @media print {
+            .no-print { display: none }
+        }
+        body {
+            font-family: Arial, sans-serif;
+            font-size: 12pt;
+            color: #000;
+            background: #fff;
+            margin: 0;
+            padding: 1cm;
+        }
+        h1 { font-size: 1.25rem; margin: 0 0 1rem; }
+        h2 { font-size: 1rem; margin: 1.5rem 0 0.5rem; }
+        a { color: #2563eb; }
+        .edit-form { max-width: 40rem; }
+        .edit-form label { display: block; margin: 0.5rem 0 0.25rem; font-weight: bold; }
+        .edit-form input { width: 100%; padding: 0.35rem; box-sizing: border-box; font-size: 0.9rem; border: 1px solid #999; border-radius: 4px; }
+        .edit-form .row { display: flex; gap: 1rem; }
+        .edit-form .row > div { flex: 1; }
+        .edit-form button { margin-top: 1rem; padding: 0.5rem 1.2rem; background: #444; color: #fff; border: none; border-radius: 4px; cursor: pointer; }
+        .error { color: #b00020; font-weight: bold; margin-top: 1rem; }
+        .no-print { margin-bottom: 1em; }
+        .no-print a {
+            display: inline-block;
+            padding: 0.5em 1em;
+            background: #ccc;
+            color: #000;
+            text-decoration: none;
+            border: 1px solid #999;
+        }
+        .no-print a:hover { background: #bbb; }
+        .no-print span { margin-left: 1em; vertical-align: middle; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #000; padding: 0.5em; text-align: left; }
+        th { background: #eee; font-weight: bold; }
+        .italic { font-style: italic; }
+        .strike { text-decoration: line-through; }
+    </style>
+</head>
+<body>
+    <div class="no-print">
+        <a href="/organizer">Back to events</a>
+        <a href="/organizer/{{.Event.SetCode}}?export=csv">Export CSV</a>
+        <span>{{.DraftCount}}/{{.Event.DraftCap}} draft</span>
+        <span>{{.SealedCount}}/{{.Event.SealedCap}} sealed</span>
+    </div>
+
+    <form class="edit-form" method="POST" action="/organizer/{{.Event.SetCode}}">
+        <h2>Edit event</h2>
+        <label>Set code</label>
+        <input type="text" name="set_code" required pattern="[A-Z0-9]{2,8}" value="{{.Event.SetCode}}">
+        <div class="row">
+            <div>
+                <label>Date</label>
+                <input type="date" name="date" required value="{{.DateInput}}">
+            </div>
+            <div>
+                <label>Time</label>
+                <input type="time" name="time" required value="{{.TimeInput}}">
+            </div>
+        </div>
+        <label>What (English)</label>
+        <input type="text" name="what_en" required value="{{.Event.WhatEn}}">
+        <label>What (German)</label>
+        <input type="text" name="what_de" required value="{{.Event.WhatDe}}">
+        <label>Where (English)</label>
+        <input type="text" name="where_en" required value="{{.Event.WhereEn}}">
+        <label>Where (German)</label>
+        <input type="text" name="where_de" required value="{{.Event.WhereDe}}">
+        <label>Where link (English URL)</label>
+        <input type="text" name="where_link_en" value="{{.Event.WhereLinkEn}}">
+        <label>Where link (German URL)</label>
+        <input type="text" name="where_link_de" value="{{.Event.WhereLinkDe}}">
+        <div class="row">
+            <div>
+                <label>Draft capacity</label>
+                <input type="number" name="draft_cap" required min="1" value="{{.Event.DraftCap}}">
+            </div>
+            <div>
+                <label>Sealed capacity</label>
+                <input type="number" name="sealed_cap" required min="1" value="{{.Event.SealedCap}}">
+            </div>
+        </div>
+        <div class="row">
+            <div>
+                <label>Draft price (€)</label>
+                <input type="number" name="draft_price" required min="0.01" step="0.01" value="{{.Event.DraftPrice}}">
+            </div>
+            <div>
+                <label>Sealed price (€)</label>
+                <input type="number" name="sealed_price" required min="0.01" step="0.01" value="{{.Event.SealedPrice}}">
+            </div>
+        </div>
+        <button type="submit">Save event</button>
+        {{if .Error}}<p class="error">{{.Error}}</p>{{end}}
+    </form>
+
+    <h2>Submissions</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Email</th>
+                <th>Format</th>
+                <th>Payment</th>
+                <th>Id</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {{range .Rows}}<tr{{if and (not .Strike) .Italic}} class="italic"{{end}}{{if and (not .Italic) .Strike}} class="strike"{{end}}{{if and .Italic .Strike}} class="italic strike"{{end}}>
+                <td>{{.Name}}</td>
+                <td>{{.Email}}</td>
+                <td>{{.Format}}</td>
+                <td>{{.Payment}}</td>
+                <td>{{.ID}}</td>
+                <td>{{.Status}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+</body>
+</html>

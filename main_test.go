@@ -46,34 +46,72 @@ func testDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS events (
+		id INTEGER PRIMARY KEY,
+		set_code TEXT UNIQUE NOT NULL,
+		date TEXT NOT NULL,
+		what_en TEXT NOT NULL,
+		what_de TEXT NOT NULL,
+		where_en TEXT NOT NULL,
+		where_de TEXT NOT NULL,
+		where_link_en TEXT NOT NULL DEFAULT '',
+		where_link_de TEXT NOT NULL DEFAULT '',
+		draft_cap INTEGER NOT NULL,
+		sealed_cap INTEGER NOT NULL,
+		draft_price REAL NOT NULL,
+		sealed_price REAL NOT NULL
+	)`)
+	if err != nil {
+		t.Fatalf("create events: %v", err)
+	}
 	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS submissions (
 		id INTEGER PRIMARY KEY,
-		email TEXT UNIQUE NOT NULL,
+		email TEXT NOT NULL,
 		name TEXT NOT NULL,
 		format TEXT NOT NULL,
 		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
 		payment TEXT NOT NULL DEFAULT 'unknown',
 		status TEXT NOT NULL DEFAULT 'confirmed',
-		lang TEXT NOT NULL DEFAULT 'en'
+		lang TEXT NOT NULL DEFAULT 'en',
+		event_id INTEGER NOT NULL REFERENCES events(id),
+		UNIQUE(event_id, email)
 	)`)
 	if err != nil {
-		t.Fatalf("create schema: %v", err)
+		t.Fatalf("create submissions: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
 }
 
-func mustInsert(t *testing.T, db *sql.DB, email, name, format, status string) {
-	mustInsertLang(t, db, email, name, format, status, "en")
+func mustInsertEvent(t *testing.T, db *sql.DB, setCode, date, whatEn, whatDe, whereEn, whereDe, whereLinkEn, whereLinkDe string, draftCap, sealedCap int, draftPrice, sealedPrice float64) int64 {
+	t.Helper()
+	res, err := db.Exec(`INSERT INTO events (set_code, date, what_en, what_de, where_en, where_de, where_link_en, where_link_de, draft_cap, sealed_cap, draft_price, sealed_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		setCode, date, whatEn, whatDe, whereEn, whereDe, whereLinkEn, whereLinkDe, draftCap, sealedCap, draftPrice, sealedPrice)
+	if err != nil {
+		t.Fatalf("insert event: %v", err)
+	}
+	id, _ := res.LastInsertId()
+	return id
 }
 
-func mustInsertLang(t *testing.T, db *sql.DB, email, name, format, status, lang string) {
+// mustCreateEvent inserts a standard event "HOB" (caps 24/8, prices 15/30) and
+// returns its id plus the set code, so most tests share one fixture.
+func mustCreateEvent(t *testing.T, db *sql.DB) (int64, string) {
 	t.Helper()
-	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, lang) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		email, name, format, 0, time.Now().UTC().Format(time.RFC3339), status, lang)
+	return mustInsertEvent(t, db, "HOB", "2026-08-07T17:30:00Z", "What EN", "Was DE", "Where EN", "Wo DE", "https://example.com/link", "https://example.com/link", 24, 8, 15, 30), "HOB"
+}
+
+func mustInsert(t *testing.T, db *sql.DB, eventID int64, email, name, format, status string) {
+	mustInsertLang(t, db, eventID, email, name, format, status, "en")
+}
+
+func mustInsertLang(t *testing.T, db *sql.DB, eventID int64, email, name, format, status, lang string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, lang, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		email, name, format, 0, time.Now().UTC().Format(time.RFC3339), status, lang, eventID)
 	if err != nil {
-		t.Fatalf("insert: %v", err)
+		t.Fatalf("insert submission: %v", err)
 	}
 }
 
@@ -86,8 +124,6 @@ func testConfig() config {
 		bic:               "GENODEM1GLS",
 		organizerEmail:    "organizer@example.com",
 		organizerPassword: "secret-token",
-		draftCap:          24,
-		sealedCap:         8,
 	}
 }
 
@@ -117,15 +153,83 @@ func postFormNoRedirect(t *testing.T, client *http.Client, url string, form url.
 	return resp
 }
 
+// loginAsOrganizer posts the login form and returns the response plus the
+// Set-Cookie header value (empty if none). Does not follow redirects.
+func loginAsOrganizer(t *testing.T, server *httptest.Server, username, password string) (*http.Response, string) {
+	t.Helper()
+	client := noRedirectClient()
+	form := url.Values{}
+	form.Set("username", username)
+	form.Set("password", password)
+	resp, err := client.PostForm(server.URL+"/organizer/login", form)
+	if err != nil {
+		t.Fatalf("login post: %v", err)
+	}
+	return resp, resp.Header.Get("Set-Cookie")
+}
+
+// authedGet performs an authenticated GET on path after logging in.
+func authedGet(t *testing.T, server *httptest.Server, path string) *http.Response {
+	t.Helper()
+	_, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
+	if setCookie == "" {
+		t.Fatalf("login did not set cookie")
+	}
+	req, _ := http.NewRequest("GET", server.URL+path, nil)
+	req.Header.Set("Cookie", setCookie)
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	return resp
+}
+
+// authedPostForm performs an authenticated POST of form on path after logging in.
+func authedPostForm(t *testing.T, server *httptest.Server, path string, form url.Values) *http.Response {
+	t.Helper()
+	_, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
+	if setCookie == "" {
+		t.Fatalf("login did not set cookie")
+	}
+	req, _ := http.NewRequest("POST", server.URL+path, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Cookie", setCookie)
+	resp, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	return resp
+}
+
+// validCreateForm builds a complete, valid event-creation form for setCode.
+func validCreateForm(setCode string) url.Values {
+	f := url.Values{}
+	f.Set("set_code", setCode)
+	f.Set("date", "2026-08-07")
+	f.Set("time", "17:30")
+	f.Set("what_en", "What EN")
+	f.Set("what_de", "Was DE")
+	f.Set("where_en", "Where EN")
+	f.Set("where_de", "Wo DE")
+	f.Set("where_link_en", "https://example.com/en")
+	f.Set("where_link_de", "https://example.com/de")
+	f.Set("draft_cap", "24")
+	f.Set("sealed_cap", "8")
+	f.Set("draft_price", "15")
+	f.Set("sealed_price", "30")
+	return f
+}
+
 func TestGetIndex(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/en/")
+	resp, err := http.Get(server.URL + "/HOB/en/")
 	if err != nil {
-		t.Fatalf("get /en/: %v", err)
+		t.Fatalf("get /HOB/en/: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -141,6 +245,7 @@ func TestGetIndex(t *testing.T) {
 
 func TestSubmitValidDraft(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -153,14 +258,14 @@ func TestSubmitValidDraft(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/en/pay") {
-		t.Fatalf("redirect = %v, want /en/pay?email=...", loc)
+	if loc == nil || !strings.HasPrefix(loc.Path, "/HOB/en/pay") {
+		t.Fatalf("redirect = %v, want /HOB/en/pay?email=...", loc)
 	}
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
@@ -174,7 +279,7 @@ func TestSubmitValidDraft(t *testing.T) {
 	if !strings.Contains(mailer.sends[0].body, "/pay?email=") || !strings.Contains(mailer.sends[0].body, "/cancel") {
 		t.Errorf("body missing /pay?email= or /cancel: %q", mailer.sends[0].body)
 	}
-	for _, bad := range []string{"15", "wero@example.com", "DE1234567890"} {
+	for _, bad := range []string{"€15", "wero@example.com", "DE1234567890"} {
 		if strings.Contains(mailer.sends[0].body, bad) {
 			t.Errorf("body contains %q", bad)
 		}
@@ -183,6 +288,7 @@ func TestSubmitValidDraft(t *testing.T) {
 
 func TestSubmitValidSealed(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -195,7 +301,7 @@ func TestSubmitValidSealed(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "no")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
@@ -203,13 +309,14 @@ func TestSubmitValidSealed(t *testing.T) {
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
 	}
-	if strings.Contains(mailer.sends[0].body, "30") {
+	if strings.Contains(mailer.sends[0].body, "€30") {
 		t.Errorf("body should not contain amount: %q", mailer.sends[0].body)
 	}
 }
 
 func TestSubmitValidationErrors(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -242,7 +349,7 @@ func TestSubmitValidationErrors(t *testing.T) {
 			}
 			tc.mod(form)
 			client := noRedirectClient()
-			resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+			resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 			defer resp.Body.Close()
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -253,6 +360,7 @@ func TestSubmitValidationErrors(t *testing.T) {
 
 func TestSubmitDuplicateEmail(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -265,10 +373,10 @@ func TestSubmitDuplicateEmail(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 
-	resp, _ := http.PostForm(server.URL+"/en/submit", form)
+	resp, _ := http.PostForm(server.URL+"/HOB/en/submit", form)
 	resp.Body.Close()
 	client := noRedirectClient()
-	resp = postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp = postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusConflict)
@@ -279,20 +387,34 @@ func TestSubmitDuplicateEmail(t *testing.T) {
 	}
 }
 
-// loginAsOrganizer posts the login form with the given credentials and returns
-// the response plus the Set-Cookie header value (empty if none). Does not
-// follow redirects.
-func loginAsOrganizer(t *testing.T, server *httptest.Server, username, password string) (*http.Response, string) {
-	t.Helper()
-	client := noRedirectClient()
+func TestPerEventIsolation(t *testing.T) {
+	db := testDB(t)
+	mustCreateEvent(t, db) // HOB
+	mustInsertEvent(t, db, "LOTR", "2026-09-01T10:00:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
 	form := url.Values{}
-	form.Set("username", username)
-	form.Set("password", password)
-	resp, err := client.PostForm(server.URL+"/organizer/login", form)
-	if err != nil {
-		t.Fatalf("login post: %v", err)
+	form.Set("email", "shared@example.com")
+	form.Set("name", "Shared")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+
+	for _, setCode := range []string{"HOB", "LOTR"} {
+		client := noRedirectClient()
+		resp := postFormNoRedirect(t, client, server.URL+"/"+setCode+"/en/submit", form)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("%s: status = %d, want %d", setCode, resp.StatusCode, http.StatusFound)
+		}
+		loc, _ := resp.Location()
+		if loc == nil || !strings.HasPrefix(loc.Path, "/"+setCode+"/en/pay") {
+			t.Fatalf("%s: redirect = %v, want /%s/en/pay?...", setCode, loc, setCode)
+		}
 	}
-	return resp, resp.Header.Get("Set-Cookie")
 }
 
 func TestOrganizerMissingAuthRedirectsToLogin(t *testing.T) {
@@ -377,11 +499,12 @@ func TestOrganizerLoginCorrectPasswordSetsCookie(t *testing.T) {
 
 func TestOrganizerCookieGrantsAccess(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "test@example.com", "Test User", "draft", "confirmed")
+	mustInsert(t, db, eventID, "test@example.com", "Test User", "draft", "confirmed")
 
 	_, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
 	if setCookie == "" {
@@ -390,7 +513,7 @@ func TestOrganizerCookieGrantsAccess(t *testing.T) {
 
 	jar, _ := cookiejar.New(nil)
 	client := &http.Client{Jar: jar}
-	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
+	req, _ := http.NewRequest("GET", server.URL+"/organizer/HOB", nil)
 	req.Header.Set("Cookie", setCookie)
 	resp, err := client.Do(req)
 	if err != nil {
@@ -417,7 +540,6 @@ func TestOrganizerCookieTamperedRejected(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	// Tamper: valid format but wrong signature.
 	tampered := "organizer_session=AAAA.BBBB"
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
 	req.Header.Set("Cookie", tampered)
@@ -442,7 +564,6 @@ func TestOrganizerCookieExpiredRejected(t *testing.T) {
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	// Build an expired cookie using the production helper with a past expiry.
 	cfg := testConfig()
 	expired := makeSessionCookie(cfg, time.Now().Add(-1*time.Hour))
 	req, _ := http.NewRequest("GET", server.URL+"/organizer", nil)
@@ -464,17 +585,18 @@ func TestOrganizerCookieExpiredRejected(t *testing.T) {
 
 func TestOrganizerSortedByStatusThenName(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "cancel@example.com", "Zed Cancelled", "draft", "cancelled")
-	mustInsert(t, db, "wait@example.com", "Alice Waitlist", "draft", "waitlist")
-	mustInsert(t, db, "confirm3@example.com", "Charlie Confirmed", "draft", "confirmed")
-	mustInsert(t, db, "confirm1@example.com", "Alice Confirmed", "draft", "confirmed")
-	mustInsert(t, db, "confirm2@example.com", "Bob Confirmed", "draft", "confirmed")
+	mustInsert(t, db, eventID, "cancel@example.com", "Zed Cancelled", "draft", "cancelled")
+	mustInsert(t, db, eventID, "wait@example.com", "Alice Waitlist", "draft", "waitlist")
+	mustInsert(t, db, eventID, "confirm3@example.com", "Charlie Confirmed", "draft", "confirmed")
+	mustInsert(t, db, eventID, "confirm1@example.com", "Alice Confirmed", "draft", "confirmed")
+	mustInsert(t, db, eventID, "confirm2@example.com", "Bob Confirmed", "draft", "confirmed")
 
-	resp := authedOrganizerGet(t, server, "")
+	resp := authedGet(t, server, "/organizer/HOB")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
@@ -500,23 +622,24 @@ func TestOrganizerSortedByStatusThenName(t *testing.T) {
 
 func TestOrganizerCapacityCounts(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	// Draft: 3 confirmed + 1 waitlist + 1 cancelled (cancelled excluded).
-	mustInsert(t, db, "d1@example.com", "Draft One", "draft", "confirmed")
-	mustInsert(t, db, "d2@example.com", "Draft Two", "draft", "confirmed")
-	mustInsert(t, db, "d3@example.com", "Draft Three", "draft", "confirmed")
-	mustInsert(t, db, "dw@example.com", "Draft Wait", "draft", "waitlist")
-	mustInsert(t, db, "dc@example.com", "Draft Cancel", "draft", "cancelled")
+	mustInsert(t, db, eventID, "d1@example.com", "Draft One", "draft", "confirmed")
+	mustInsert(t, db, eventID, "d2@example.com", "Draft Two", "draft", "confirmed")
+	mustInsert(t, db, eventID, "d3@example.com", "Draft Three", "draft", "confirmed")
+	mustInsert(t, db, eventID, "dw@example.com", "Draft Wait", "draft", "waitlist")
+	mustInsert(t, db, eventID, "dc@example.com", "Draft Cancel", "draft", "cancelled")
 	// Sealed: 2 confirmed + 1 waitlist + 1 cancelled.
-	mustInsert(t, db, "s1@example.com", "Sealed One", "sealed", "confirmed")
-	mustInsert(t, db, "s2@example.com", "Sealed Two", "sealed", "confirmed")
-	mustInsert(t, db, "sw@example.com", "Sealed Wait", "sealed", "waitlist")
-	mustInsert(t, db, "sc@example.com", "Sealed Cancel", "sealed", "cancelled")
+	mustInsert(t, db, eventID, "s1@example.com", "Sealed One", "sealed", "confirmed")
+	mustInsert(t, db, eventID, "s2@example.com", "Sealed Two", "sealed", "confirmed")
+	mustInsert(t, db, eventID, "sw@example.com", "Sealed Wait", "sealed", "waitlist")
+	mustInsert(t, db, eventID, "sc@example.com", "Sealed Cancel", "sealed", "cancelled")
 
-	resp := authedOrganizerGet(t, server, "")
+	resp := authedGet(t, server, "/organizer/HOB")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
@@ -529,33 +652,17 @@ func TestOrganizerCapacityCounts(t *testing.T) {
 	}
 }
 
-// authedOrganizerGet performs a GET /organizer[?query] after logging in,
-// returning the authenticated response.
-func authedOrganizerGet(t *testing.T, server *httptest.Server, query string) *http.Response {
-	t.Helper()
-	_, setCookie := loginAsOrganizer(t, server, "organizer", "secret-token")
-	if setCookie == "" {
-		t.Fatalf("login did not set cookie")
-	}
-	req, _ := http.NewRequest("GET", server.URL+"/organizer"+query, nil)
-	req.Header.Set("Cookie", setCookie)
-	resp, err := noRedirectClient().Do(req)
-	if err != nil {
-		t.Fatalf("get: %v", err)
-	}
-	return resp
-}
-
 func TestOrganizerRowStyling(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "sealed@example.com", "Sealed User", "sealed", "confirmed")
-	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
+	mustInsert(t, db, eventID, "sealed@example.com", "Sealed User", "sealed", "confirmed")
+	mustInsert(t, db, eventID, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
 
-	resp := authedOrganizerGet(t, server, "")
+	resp := authedGet(t, server, "/organizer/HOB")
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
@@ -567,15 +674,16 @@ func TestOrganizerRowStyling(t *testing.T) {
 	}
 }
 
-func TestOrganizerCSVExport(t *testing.T) {
+func TestOrganizerPerEventCSV(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsertLang(t, db, "csvtest@example.com", "CSV Test", "draft", "confirmed", "de")
+	mustInsertLang(t, db, eventID, "csvtest@example.com", "CSV Test", "draft", "confirmed", "de")
 
-	resp := authedOrganizerGet(t, server, "?export=csv")
+	resp := authedGet(t, server, "/organizer/HOB?export=csv")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -583,8 +691,8 @@ func TestOrganizerCSVExport(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); ct != "text/csv" {
 		t.Errorf("content-type = %q, want text/csv", ct)
 	}
-	if cd := resp.Header.Get("Content-Disposition"); cd != "attachment; filename=\"submissions.csv\"" {
-		t.Errorf("content-disposition = %q, want attachment; filename=\"submissions.csv\"", cd)
+	if cd := resp.Header.Get("Content-Disposition"); cd != "attachment; filename=\"HOB.csv\"" {
+		t.Errorf("content-disposition = %q, want attachment; filename=\"HOB.csv\"", cd)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	reader := csv.NewReader(bytes.NewReader(body))
@@ -598,11 +706,14 @@ func TestOrganizerCSVExport(t *testing.T) {
 	if rows[0][0] != "id" || rows[0][1] != "email" || rows[0][2] != "name" {
 		t.Errorf("header mismatch: %v", rows[0])
 	}
-	if len(rows[0]) != 9 {
-		t.Errorf("header column count = %d, want 9", len(rows[0]))
+	if len(rows[0]) != 10 {
+		t.Errorf("header column count = %d, want 10", len(rows[0]))
 	}
-	if rows[0][8] != "lang" {
-		t.Errorf("9th header = %q, want lang", rows[0][8])
+	if rows[0][9] != "set_code" {
+		t.Errorf("10th header = %q, want set_code", rows[0][9])
+	}
+	if rows[1][9] != "HOB" {
+		t.Errorf("set_code value = %q, want HOB", rows[1][9])
 	}
 	if rows[1][8] != "de" {
 		t.Errorf("lang value = %q, want de", rows[1][8])
@@ -611,12 +722,13 @@ func TestOrganizerCSVExport(t *testing.T) {
 
 func TestOrganizerCSVExportRequiresAuth(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	client := noRedirectClient()
-	resp, err := client.Get(server.URL + "/organizer?export=csv")
+	resp, err := client.Get(server.URL + "/organizer/HOB?export=csv")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -638,7 +750,7 @@ func TestHealth(t *testing.T) {
 
 	resp, err := http.Get(server.URL + "/health")
 	if err != nil {
-		t.Fatalf("get: %v", err)
+		t.Fatalf("get /health: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -652,6 +764,7 @@ func TestHealth(t *testing.T) {
 
 func TestSubmitMailerFailNotifies(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{fail: map[int]bool{0: true}}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -664,14 +777,14 @@ func TestSubmitMailerFailNotifies(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/en/pay") {
-		t.Errorf("redirect = %v, want /pay?email=...", loc)
+	if loc == nil || !strings.HasPrefix(loc.Path, "/HOB/en/pay") {
+		t.Errorf("redirect = %v, want /HOB/en/pay?email=...", loc)
 	}
 	if len(mailer.sends) != 2 {
 		t.Fatalf("sends = %d, want 2", len(mailer.sends))
@@ -683,6 +796,7 @@ func TestSubmitMailerFailNotifies(t *testing.T) {
 
 func TestSubmitMailerBothFailStillRedirects(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{fail: map[int]bool{0: true, 1: true}}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -695,25 +809,26 @@ func TestSubmitMailerBothFailStillRedirects(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/en/pay") {
-		t.Errorf("redirect = %v, want /pay?email=...", loc)
+	if loc == nil || !strings.HasPrefix(loc.Path, "/HOB/en/pay") {
+		t.Errorf("redirect = %v, want /HOB/en/pay?email=...", loc)
 	}
 }
 
 func TestDraftWaitlist(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	for i := 0; i < 24; i++ {
-		mustInsert(t, db, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
+		mustInsert(t, db, eventID, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
 	}
 
 	form := url.Values{}
@@ -724,14 +839,14 @@ func TestDraftWaitlist(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/en/waitlist" {
-		t.Fatalf("redirect = %v, want /en/waitlist", loc)
+	if loc == nil || loc.Path != "/HOB/en/waitlist" {
+		t.Fatalf("redirect = %v, want /HOB/en/waitlist", loc)
 	}
 
 	var status string
@@ -752,12 +867,13 @@ func TestDraftWaitlist(t *testing.T) {
 
 func TestSealedWaitlist(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	for i := 0; i < 8; i++ {
-		mustInsert(t, db, fmt.Sprintf("sealed%d@example.com", i), fmt.Sprintf("Sealed %d", i), "sealed", "confirmed")
+		mustInsert(t, db, eventID, fmt.Sprintf("sealed%d@example.com", i), fmt.Sprintf("Sealed %d", i), "sealed", "confirmed")
 	}
 
 	form := url.Values{}
@@ -768,14 +884,14 @@ func TestSealedWaitlist(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/en/waitlist" {
-		t.Fatalf("redirect = %v, want /en/waitlist", loc)
+	if loc == nil || loc.Path != "/HOB/en/waitlist" {
+		t.Fatalf("redirect = %v, want /HOB/en/waitlist", loc)
 	}
 
 	var status string
@@ -788,21 +904,15 @@ func TestSealedWaitlist(t *testing.T) {
 	}
 }
 
-func TestCustomCapacities(t *testing.T) {
+func TestPerEventCapacities(t *testing.T) {
 	db := testDB(t)
+	eventID := mustInsertEvent(t, db, "CAP", "2026-08-07T17:30:00Z", "What", "Was", "Where", "Wo", "", "", 3, 8, 15, 30)
 	mailer := &fakeMailer{}
-	cfg := testConfig()
-	cfg.draftCap = 3
-	cfg.sealedCap = 2
-	handler, err := setupHandlers(db, mailer, cfg)
-	if err != nil {
-		t.Fatalf("setup handlers: %v", err)
-	}
-	server := httptest.NewServer(handler)
+	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	for i := 0; i < 3; i++ {
-		mustInsert(t, db, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
+		mustInsert(t, db, eventID, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
 	}
 
 	form := url.Values{}
@@ -813,18 +923,18 @@ func TestCustomCapacities(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/CAP/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/en/waitlist" {
-		t.Fatalf("redirect = %v, want /en/waitlist", loc)
+	if loc == nil || loc.Path != "/CAP/en/waitlist" {
+		t.Fatalf("redirect = %v, want /CAP/en/waitlist", loc)
 	}
 
 	var status string
-	err = db.QueryRow("SELECT status FROM submissions WHERE email=?", "waitdraft@example.com").Scan(&status)
+	err := db.QueryRow("SELECT status FROM submissions WHERE email=?", "waitdraft@example.com").Scan(&status)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -841,17 +951,18 @@ func TestCustomCapacities(t *testing.T) {
 
 func TestSeatCountsAfterSubmissions(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	for i := 0; i < 3; i++ {
-		mustInsert(t, db, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
+		mustInsert(t, db, eventID, fmt.Sprintf("draft%d@example.com", i), fmt.Sprintf("Draft %d", i), "draft", "confirmed")
 	}
 
-	resp, err := http.Get(server.URL + "/en/")
+	resp, err := http.Get(server.URL + "/HOB/en/")
 	if err != nil {
-		t.Fatalf("get /: %v", err)
+		t.Fatalf("get /HOB/en/: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
@@ -865,11 +976,12 @@ func TestSeatCountsAfterSubmissions(t *testing.T) {
 
 func TestCancelPage(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/en/cancel")
+	resp, err := http.Get(server.URL + "/HOB/en/cancel")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -878,7 +990,7 @@ func TestCancelPage(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	for _, want := range []string{`<input`, `action="/en/cancel"`} {
+	for _, want := range []string{`<input`, `action="/HOB/en/cancel"`} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("body missing %q", want)
 		}
@@ -887,16 +999,17 @@ func TestCancelPage(t *testing.T) {
 
 func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "canceler@example.com", "Canceler", "draft", "confirmed")
-	mustInsert(t, db, "waiter@example.com", "Waiter", "draft", "waitlist")
+	mustInsert(t, db, eventID, "canceler@example.com", "Canceler", "draft", "confirmed")
+	mustInsert(t, db, eventID, "waiter@example.com", "Waiter", "draft", "waitlist")
 
 	form := url.Values{}
 	form.Set("email", "canceler@example.com")
-	resp, err := http.PostForm(server.URL+"/en/cancel", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -910,8 +1023,8 @@ func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 	}
 
 	var cancelStatus, waitStatus string
-	db.QueryRow("SELECT status FROM submissions WHERE email=?", "canceler@example.com").Scan(&cancelStatus)
-	db.QueryRow("SELECT status FROM submissions WHERE email=?", "waiter@example.com").Scan(&waitStatus)
+	db.QueryRow("SELECT status FROM submissions WHERE event_id=? AND email=?", eventID, "canceler@example.com").Scan(&cancelStatus)
+	db.QueryRow("SELECT status FROM submissions WHERE event_id=? AND email=?", eventID, "waiter@example.com").Scan(&waitStatus)
 	if cancelStatus != "cancelled" {
 		t.Errorf("canceler status = %q, want cancelled", cancelStatus)
 	}
@@ -923,8 +1036,8 @@ func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 	for _, s := range mailer.sends {
 		if s.to == "waiter@example.com" && strings.Contains(s.subject, "signed up") {
 			promotionFound = true
-			if !strings.Contains(s.body, "/pay?email=") {
-				t.Errorf("promotion email missing /pay?email=: %s", s.body)
+			if !strings.Contains(s.body, "/HOB/en/pay?email=") {
+				t.Errorf("promotion email missing /HOB/en/pay?email=: %s", s.body)
 			}
 		}
 		if s.to == "organizer@example.com" && strings.Contains(s.body, "Canceler") && strings.Contains(s.body, "Waiter") {
@@ -941,15 +1054,16 @@ func TestCancelConfirmedPromotesWaitlist(t *testing.T) {
 
 func TestCancelConfirmedNoWaitlist(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "canceler2@example.com", "Canceler2", "draft", "confirmed")
+	mustInsert(t, db, eventID, "canceler2@example.com", "Canceler2", "draft", "confirmed")
 
 	form := url.Values{}
 	form.Set("email", "canceler2@example.com")
-	resp, err := http.PostForm(server.URL+"/en/cancel", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -959,7 +1073,7 @@ func TestCancelConfirmedNoWaitlist(t *testing.T) {
 	}
 
 	var status string
-	db.QueryRow("SELECT status FROM submissions WHERE email=?", "canceler2@example.com").Scan(&status)
+	db.QueryRow("SELECT status FROM submissions WHERE event_id=? AND email=?", eventID, "canceler2@example.com").Scan(&status)
 	if status != "cancelled" {
 		t.Errorf("status = %q, want cancelled", status)
 	}
@@ -974,15 +1088,16 @@ func TestCancelConfirmedNoWaitlist(t *testing.T) {
 
 func TestCancelWaitlist(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "waitcancel@example.com", "Wait Cancel", "sealed", "waitlist")
+	mustInsert(t, db, eventID, "waitcancel@example.com", "Wait Cancel", "sealed", "waitlist")
 
 	form := url.Values{}
 	form.Set("email", "waitcancel@example.com")
-	resp, err := http.PostForm(server.URL+"/en/cancel", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -992,7 +1107,7 @@ func TestCancelWaitlist(t *testing.T) {
 	}
 
 	var status string
-	db.QueryRow("SELECT status FROM submissions WHERE email=?", "waitcancel@example.com").Scan(&status)
+	db.QueryRow("SELECT status FROM submissions WHERE event_id=? AND email=?", eventID, "waitcancel@example.com").Scan(&status)
 	if status != "cancelled" {
 		t.Errorf("status = %q, want cancelled", status)
 	}
@@ -1006,13 +1121,14 @@ func TestCancelWaitlist(t *testing.T) {
 
 func TestCancelUnknownEmail(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	form := url.Values{}
 	form.Set("email", "unknown@example.com")
-	resp, err := http.PostForm(server.URL+"/en/cancel", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -1028,15 +1144,16 @@ func TestCancelUnknownEmail(t *testing.T) {
 
 func TestCancelAlreadyCancelled(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "already@example.com", "Already", "draft", "cancelled")
+	mustInsert(t, db, eventID, "already@example.com", "Already", "draft", "cancelled")
 
 	form := url.Values{}
 	form.Set("email", "already@example.com")
-	resp, err := http.PostForm(server.URL+"/en/cancel", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -1052,22 +1169,21 @@ func TestCancelAlreadyCancelled(t *testing.T) {
 
 func TestSeatsLeftClampedAtZero(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	// More confirmed than cap should not cause negative display.
 	for i := 0; i < 30; i++ {
-		mustInsert(t, db, fmt.Sprintf("overdraft%d@example.com", i), fmt.Sprintf("Over %d", i), "draft", "confirmed")
+		mustInsert(t, db, eventID, fmt.Sprintf("overdraft%d@example.com", i), fmt.Sprintf("Over %d", i), "draft", "confirmed")
 	}
 
-	resp, err := http.Get(server.URL + "/en/")
+	resp, err := http.Get(server.URL + "/HOB/en/")
 	if err != nil {
-		t.Fatalf("get /: %v", err)
+		t.Fatalf("get /HOB/en/: %v", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	// We expect label to show 0 left for draft.
 	if strings.Contains(string(body), "-6") {
 		t.Errorf("body contains negative seats: %q", string(body))
 	}
@@ -1075,6 +1191,7 @@ func TestSeatsLeftClampedAtZero(t *testing.T) {
 
 func TestSubmitRejectsCRLFInName(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1088,7 +1205,7 @@ func TestSubmitRejectsCRLFInName(t *testing.T) {
 		form.Set("data_consent", "on")
 		form.Set("mailing_list", "yes")
 		client := noRedirectClient()
-		resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+		resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("name %q: status = %d, want %d", bad, resp.StatusCode, http.StatusBadRequest)
@@ -1098,6 +1215,7 @@ func TestSubmitRejectsCRLFInName(t *testing.T) {
 
 func TestSubmitRejectsCRLFInEmail(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1110,7 +1228,7 @@ func TestSubmitRejectsCRLFInEmail(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
@@ -1118,10 +1236,20 @@ func TestSubmitRejectsCRLFInEmail(t *testing.T) {
 }
 
 func TestEPCPayload(t *testing.T) {
-	got := epcPayload("GENODEM1GLS", "Test Recipient", "DE12345678901234567890", 15, "Prerelease id 7")
-	want := "BCD\r\n001\r\n1\r\nSCT\r\nGENODEM1GLS\r\nTest Recipient\r\nDE12345678901234567890\r\nEUR15,00\r\n\r\n\r\nPrerelease id 7\r\n\r\n"
-	if got != want {
-		t.Errorf("epcPayload() = %q, want %q", got, want)
+	cases := []struct {
+		amount float64
+		amt    string
+	}{
+		{15, "EUR15,00"},
+		{12.50, "EUR12,50"},
+		{25, "EUR25,00"},
+	}
+	for _, c := range cases {
+		got := epcPayload("GENODEM1GLS", "Test Recipient", "DE12345678901234567890", c.amount, "Prerelease id 7")
+		want := fmt.Sprintf("BCD\r\n001\r\n1\r\nSCT\r\nGENODEM1GLS\r\nTest Recipient\r\nDE12345678901234567890\r\n%s\r\n\r\n\r\nPrerelease id 7\r\n\r\n", c.amt)
+		if got != want {
+			t.Errorf("epcPayload(%v) = %q, want %q", c.amount, got, want)
+		}
 	}
 }
 
@@ -1138,8 +1266,6 @@ func TestSVGWriter(t *testing.T) {
 	if !strings.Contains(s, `<rect`) || !strings.Contains(s, `fill="#000"`) {
 		t.Errorf("missing rect with fill: %s", s)
 	}
-	// Build the QR directly to learn its dimension, then assert the SVG's
-	// width/height equal dim*scale (the svgWriter contract).
 	qrc, err := qrcode.New("test")
 	if err != nil {
 		t.Fatalf("qrcode.New: %v", err)
@@ -1153,13 +1279,14 @@ func TestSVGWriter(t *testing.T) {
 
 func TestPayPageConfirmed(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "draftuser@example.com", "Draft User", "draft", "confirmed")
+	mustInsert(t, db, eventID, "draftuser@example.com", "Draft User", "draft", "confirmed")
 
-	resp, err := http.Get(server.URL + "/en/pay?email=draftuser@example.com")
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=draftuser@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1177,13 +1304,14 @@ func TestPayPageConfirmed(t *testing.T) {
 
 func TestPayPageSealed(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "sealeduser@example.com", "Sealed User", "sealed", "confirmed")
+	mustInsert(t, db, eventID, "sealeduser@example.com", "Sealed User", "sealed", "confirmed")
 
-	resp, err := http.Get(server.URL + "/en/pay?email=sealeduser@example.com")
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=sealeduser@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1194,13 +1322,85 @@ func TestPayPageSealed(t *testing.T) {
 	}
 }
 
-func TestPayPageUnknownEmail(t *testing.T) {
+func TestPerEventPriceRender(t *testing.T) {
 	db := testDB(t)
+	eventID := mustInsertEvent(t, db, "PRICE", "2026-08-07T17:30:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 20, 40)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/en/pay?email=nobody@example.com")
+	mustInsert(t, db, eventID, "d@example.com", "Draft P", "draft", "confirmed")
+	mustInsert(t, db, eventID, "s@example.com", "Sealed P", "sealed", "confirmed")
+
+	resp, err := http.Get(server.URL + "/PRICE/en/pay?email=d@example.com")
+	if err != nil {
+		t.Fatalf("get draft pay: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "€20") {
+		t.Errorf("draft pay missing €20: %s", string(body))
+	}
+	if strings.Contains(string(body), "€15") {
+		t.Errorf("draft pay should not show €15: %s", string(body))
+	}
+
+	resp, err = http.Get(server.URL + "/PRICE/en/pay?email=s@example.com")
+	if err != nil {
+		t.Fatalf("get sealed pay: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "€40") {
+		t.Errorf("sealed pay missing €40: %s", string(body))
+	}
+	if strings.Contains(string(body), "€30") {
+		t.Errorf("sealed pay should not show €30: %s", string(body))
+	}
+}
+
+func TestDecimalPriceRender(t *testing.T) {
+	db := testDB(t)
+	eventID := mustInsertEvent(t, db, "DEC", "2026-08-07T17:30:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 12.50, 25)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, eventID, "draft@example.com", "Draft", "draft", "confirmed")
+
+	resp, err := http.Get(server.URL + "/DEC/en/")
+	if err != nil {
+		t.Fatalf("get index: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{"€12.50", "€25.00"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("index missing %q: %s", want, string(body))
+		}
+	}
+
+	resp, err = http.Get(server.URL + "/DEC/en/pay?email=draft@example.com")
+	if err != nil {
+		t.Fatalf("get pay: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{"€12.50", "a=1250"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("pay page missing %q: %s", want, string(body))
+		}
+	}
+}
+
+func TestPayPageUnknownEmail(t *testing.T) {
+	db := testDB(t)
+	mustCreateEvent(t, db)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=nobody@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1216,13 +1416,14 @@ func TestPayPageUnknownEmail(t *testing.T) {
 
 func TestPayPageWaitlist(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "waitlist@example.com", "Waitlist User", "draft", "waitlist")
+	mustInsert(t, db, eventID, "waitlist@example.com", "Waitlist User", "draft", "waitlist")
 
-	resp, err := http.Get(server.URL + "/en/pay?email=waitlist@example.com")
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=waitlist@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1235,13 +1436,14 @@ func TestPayPageWaitlist(t *testing.T) {
 
 func TestPayPageCancelled(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
+	mustInsert(t, db, eventID, "cancelled@example.com", "Cancelled User", "draft", "cancelled")
 
-	resp, err := http.Get(server.URL + "/en/pay?email=cancelled@example.com")
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=cancelled@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1254,17 +1456,18 @@ func TestPayPageCancelled(t *testing.T) {
 
 func TestPayPageAlreadyPaid(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"paid@example.com", "Paid User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "paid")
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"paid@example.com", "Paid User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "paid", eventID)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	resp, err := http.Get(server.URL + "/en/pay?email=paid@example.com")
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=paid@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1285,17 +1488,18 @@ func TestPayPageAlreadyPaid(t *testing.T) {
 
 func TestPayPageCashMarked(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"cash@example.com", "Cash User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "cash")
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"cash@example.com", "Cash User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "cash", eventID)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
-	resp, err := http.Get(server.URL + "/en/pay?email=cash@example.com")
+	resp, err := http.Get(server.URL + "/HOB/en/pay?email=cash@example.com")
 	if err != nil {
 		t.Fatalf("get /pay: %v", err)
 	}
@@ -1308,28 +1512,29 @@ func TestPayPageCashMarked(t *testing.T) {
 
 func TestPayMarkPaidWero(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "weropay@example.com", "Wero Pay", "draft", "confirmed")
+	mustInsert(t, db, eventID, "weropay@example.com", "Wero Pay", "draft", "confirmed")
 
 	form := url.Values{}
 	form.Set("email", "weropay@example.com")
 	form.Set("method", "wero")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/pay", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if !strings.HasPrefix(loc.Path, "/en/pay") {
-		t.Errorf("redirect = %v, want /pay", loc)
+	if !strings.HasPrefix(loc.Path, "/HOB/en/pay") {
+		t.Errorf("redirect = %v, want /HOB/en/pay", loc)
 	}
 
 	var payment string
-	err := db.QueryRow("SELECT payment FROM submissions WHERE email=?", "weropay@example.com").Scan(&payment)
+	err := db.QueryRow("SELECT payment FROM submissions WHERE event_id=? AND email=?", eventID, "weropay@example.com").Scan(&payment)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1340,21 +1545,22 @@ func TestPayMarkPaidWero(t *testing.T) {
 
 func TestPayMarkPaidIBAN(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "ibanpay@example.com", "IBAN Pay", "draft", "confirmed")
+	mustInsert(t, db, eventID, "ibanpay@example.com", "IBAN Pay", "draft", "confirmed")
 
 	form := url.Values{}
 	form.Set("email", "ibanpay@example.com")
 	form.Set("method", "iban")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/pay", form)
 	defer resp.Body.Close()
 
 	var payment string
-	err := db.QueryRow("SELECT payment FROM submissions WHERE email=?", "ibanpay@example.com").Scan(&payment)
+	err := db.QueryRow("SELECT payment FROM submissions WHERE event_id=? AND email=?", eventID, "ibanpay@example.com").Scan(&payment)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1365,21 +1571,22 @@ func TestPayMarkPaidIBAN(t *testing.T) {
 
 func TestPayMarkCash(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "cashpay@example.com", "Cash Pay", "draft", "confirmed")
+	mustInsert(t, db, eventID, "cashpay@example.com", "Cash Pay", "draft", "confirmed")
 
 	form := url.Values{}
 	form.Set("email", "cashpay@example.com")
 	form.Set("method", "cash")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/pay", form)
 	defer resp.Body.Close()
 
 	var payment string
-	err := db.QueryRow("SELECT payment FROM submissions WHERE email=?", "cashpay@example.com").Scan(&payment)
+	err := db.QueryRow("SELECT payment FROM submissions WHERE event_id=? AND email=?", eventID, "cashpay@example.com").Scan(&payment)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1390,12 +1597,13 @@ func TestPayMarkCash(t *testing.T) {
 
 func TestPayLockedAfterMark(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		"locked@example.com", "Locked User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "paid")
+	_, err := db.Exec(`INSERT INTO submissions (email, name, format, mailing_list, created_at, status, payment, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"locked@example.com", "Locked User", "draft", 0, time.Now().UTC().Format(time.RFC3339), "confirmed", "paid", eventID)
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -1404,11 +1612,11 @@ func TestPayLockedAfterMark(t *testing.T) {
 	form.Set("email", "locked@example.com")
 	form.Set("method", "cash")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/en/pay", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/pay", form)
 	defer resp.Body.Close()
 
 	var payment string
-	err = db.QueryRow("SELECT payment FROM submissions WHERE email=?", "locked@example.com").Scan(&payment)
+	err = db.QueryRow("SELECT payment FROM submissions WHERE event_id=? AND email=?", eventID, "locked@example.com").Scan(&payment)
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -1419,16 +1627,17 @@ func TestPayLockedAfterMark(t *testing.T) {
 
 func TestPayInvalidMethod(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "invalid@example.com", "Invalid", "draft", "confirmed")
+	mustInsert(t, db, eventID, "invalid@example.com", "Invalid", "draft", "confirmed")
 
 	form := url.Values{}
 	form.Set("email", "invalid@example.com")
 	form.Set("method", "bogus")
-	resp, err := http.PostForm(server.URL+"/en/pay", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/pay", form)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -1440,6 +1649,7 @@ func TestPayInvalidMethod(t *testing.T) {
 
 func TestPayInvalidEmail(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1447,7 +1657,7 @@ func TestPayInvalidEmail(t *testing.T) {
 	form := url.Values{}
 	form.Set("email", "")
 	form.Set("method", "wero")
-	resp, err := http.PostForm(server.URL+"/en/pay", form)
+	resp, err := http.PostForm(server.URL+"/HOB/en/pay", form)
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -1486,8 +1696,10 @@ func TestParseAcceptLanguage(t *testing.T) {
 	}
 }
 
-func TestRootRedirectsDefault(t *testing.T) {
+func TestRootRedirectsToLatestEvent(t *testing.T) {
 	db := testDB(t)
+	mustInsertEvent(t, db, "EARL", "2026-01-01T10:00:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
+	mustInsertEvent(t, db, "LATE", "2026-12-01T10:00:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1502,63 +1714,453 @@ func TestRootRedirectsDefault(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/en/" {
-		t.Errorf("redirect = %v, want /en/", loc)
+	if loc == nil || loc.Path != "/LATE" {
+		t.Errorf("redirect = %v, want /LATE (latest by date)", loc)
 	}
 }
 
-func TestRootRedirectsAcceptLanguage(t *testing.T) {
+func TestSetCodeRedirectsByAcceptLanguage(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	req, _ := http.NewRequest("GET", server.URL+"/", nil)
+	req, _ := http.NewRequest("GET", server.URL+"/HOB", nil)
 	req.Header.Set("Accept-Language", "de-DE,de;q=0.9")
 	client := noRedirectClient()
 	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("get /: %v", err)
+		t.Fatalf("get /HOB: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/de/" {
-		t.Errorf("redirect = %v, want /de/", loc)
+	if loc == nil || loc.Path != "/HOB/de/" {
+		t.Errorf("redirect = %v, want /HOB/de/", loc)
 	}
 }
 
-func TestRootRedirectsUnsupportedFallsBack(t *testing.T) {
+func TestEventCreation(t *testing.T) {
 	db := testDB(t)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	req, _ := http.NewRequest("GET", server.URL+"/", nil)
-	req.Header.Set("Accept-Language", "fr-FR")
-	client := noRedirectClient()
-	resp, err := client.Do(req)
+	t.Run("auth required", func(t *testing.T) {
+		form := validCreateForm("NEW1")
+		client := noRedirectClient()
+		resp := postFormNoRedirect(t, client, server.URL+"/organizer", form)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+		}
+		loc, _ := resp.Location()
+		if loc == nil || loc.Path != "/organizer/login" {
+			t.Errorf("redirect = %v, want /organizer/login", loc)
+		}
+	})
+
+	t.Run("valid", func(t *testing.T) {
+		form := validCreateForm("NEW1")
+		resp := authedPostForm(t, server, "/organizer", form)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+		}
+		loc, _ := resp.Location()
+		if loc == nil || loc.Path != "/organizer/NEW1" {
+			t.Errorf("redirect = %v, want /organizer/NEW1", loc)
+		}
+		var whatEn string
+		err := db.QueryRow("SELECT what_en FROM events WHERE set_code=?", "NEW1").Scan(&whatEn)
+		if err != nil {
+			t.Fatalf("event not inserted: %v", err)
+		}
+		if whatEn != "What EN" {
+			t.Errorf("what_en = %q, want What EN", whatEn)
+		}
+	})
+
+	t.Run("missing required field", func(t *testing.T) {
+		form := validCreateForm("NEW2")
+		form.Del("what_en")
+		resp := authedPostForm(t, server, "/organizer", form)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("invalid set code", func(t *testing.T) {
+		for _, code := range []string{"hob", "A", "ABCDEFGHI", "AB!"} {
+			form := validCreateForm(code)
+			resp := authedPostForm(t, server, "/organizer", form)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("set_code %q: status = %d, want %d", code, resp.StatusCode, http.StatusBadRequest)
+			}
+		}
+	})
+
+	t.Run("reserved set code", func(t *testing.T) {
+		for _, code := range []string{"organizer", "en", "de", "health", "events", "new"} {
+			// reserved words are lowercase and thus also fail the regex,
+			// but uppercase-reserved variants are covered implicitly; this
+			// asserts the reserved list itself rejects them.
+			form := validCreateForm(code)
+			resp := authedPostForm(t, server, "/organizer", form)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Errorf("reserved %q: status = %d, want %d", code, resp.StatusCode, http.StatusBadRequest)
+			}
+		}
+	})
+
+	t.Run("duplicate set code", func(t *testing.T) {
+		mustInsertEvent(t, db, "DUP", "2026-08-07T17:30:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
+		form := validCreateForm("DUP")
+		resp := authedPostForm(t, server, "/organizer", form)
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if !strings.Contains(string(body), "already exists") {
+			t.Errorf("body missing 'already exists': %q", string(body))
+		}
+	})
+}
+
+func TestCreateFormPrefill(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp := authedGet(t, server, "/organizer")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{
+		`type="date"`,
+		`type="time"`,
+		`value="17:30"`,
+		`name="where_link_en"`,
+		`name="where_link_de"`,
+		`Draft & Sealed from English Play Booster Displays (no Prerelease Packs), 3-round-tournament, no prizes`,
+		`Draft & Sealed aus englischen Play Booster Displays (keine Prerelease Packs), 3-Runden-Turnier, keine Preise`,
+		`Ziegelstr. 4, 10117 Berlin; same Location as weekly draft: `,
+		`Ziegelstr. 4, 10117 Berlin; gleicher Ort wie wöchentlicher Draft: `,
+		`https://mtg-cube.de/hedwig-english/`,
+		`https://mtg-cube.de/hedwig"`,
+		`value="12.50"`,
+		`value="25"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("create form missing %q", want)
+		}
+	}
+}
+
+func TestCreateEventWithDecimalPrices(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := validCreateForm("DEC")
+	form.Set("draft_price", "12.50")
+	form.Set("sealed_price", "25")
+	resp := authedPostForm(t, server, "/organizer", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+
+	var draftPrice, sealedPrice float64
+	err := db.QueryRow("SELECT draft_price, sealed_price FROM events WHERE set_code=?", "DEC").Scan(&draftPrice, &sealedPrice)
 	if err != nil {
-		t.Fatalf("get /: %v", err)
+		t.Fatalf("query: %v", err)
+	}
+	if draftPrice != 12.50 {
+		t.Errorf("draft_price = %v, want 12.50", draftPrice)
+	}
+	if sealedPrice != 25 {
+		t.Errorf("sealed_price = %v, want 25", sealedPrice)
+	}
+}
+
+func TestOrganizerEventList(t *testing.T) {
+	db := testDB(t)
+	mustInsertEvent(t, db, "ALFA", "2026-03-01T10:00:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
+	mustInsertEvent(t, db, "BRAVO", "2026-09-01T10:00:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp := authedGet(t, server, "/organizer")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	for _, want := range []string{"ALFA", "BRAVO"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("body missing event %q: %q", want, string(body))
+		}
+	}
+	// Newest first: BRAVO (Sep) before ALFA (Mar).
+	bravoIdx := strings.Index(string(body), "BRAVO")
+	alfaIdx := strings.Index(string(body), "ALFA")
+	if bravoIdx < 0 || alfaIdx < 0 || bravoIdx > alfaIdx {
+		t.Errorf("events not sorted newest first: %q", string(body))
+	}
+}
+
+func TestOrganizerEventListDateFormat(t *testing.T) {
+	db := testDB(t)
+	mustInsertEvent(t, db, "ALFA", "2026-03-01T10:00:00Z", "What", "Was", "Where", "Wo", "", "", 24, 8, 15, 30)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp := authedGet(t, server, "/organizer")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	if !strings.Contains(s, "2026-03-01 10:00") {
+		t.Errorf("list date not formatted as yyyy-mm-dd 24h: %s", s)
+	}
+	if strings.Contains(s, "T10:00:00Z") {
+		t.Errorf("list date still raw RFC3339: %s", s)
+	}
+}
+
+func TestOrganizerEventPage(t *testing.T) {
+	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	mustInsert(t, db, eventID, "viewer@example.com", "Viewer", "draft", "confirmed")
+
+	t.Run("authed shows submissions and edit form", func(t *testing.T) {
+		resp := authedGet(t, server, "/organizer/HOB")
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		for _, want := range []string{"Viewer", "Edit event", "Save event"} {
+			if !strings.Contains(string(body), want) {
+				t.Errorf("body missing %q: %q", want, string(body))
+			}
+		}
+	})
+
+	t.Run("unauthed redirects to login", func(t *testing.T) {
+		client := noRedirectClient()
+		resp, err := client.Get(server.URL + "/organizer/HOB")
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusFound {
+			t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+		}
+		loc, _ := resp.Location()
+		if loc == nil || loc.Path != "/organizer/login" {
+			t.Errorf("redirect = %v, want /organizer/login", loc)
+		}
+	})
+}
+
+func TestEditFormSplitWhereLink(t *testing.T) {
+	db := testDB(t)
+	mustInsertEvent(t, db, "EDIT", "2026-08-07T17:30:00Z", "What", "Was", "Where", "Wo", "https://en.example", "https://de.example", 24, 8, 15, 30)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp := authedGet(t, server, "/organizer/EDIT")
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	s := string(body)
+	for _, want := range []string{
+		`name="where_link_en"`,
+		`name="where_link_de"`,
+		`value="https://en.example"`,
+		`value="https://de.example"`,
+		`step="0.01"`,
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("edit form missing %q: %s", want, s)
+		}
+	}
+}
+
+func TestOrganizerEventEdit(t *testing.T) {
+	db := testDB(t)
+	mustCreateEvent(t, db)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := validCreateForm("HOB")
+	form.Set("what_en", "Updated What")
+	form.Set("draft_cap", "10")
+	resp := authedPostForm(t, server, "/organizer/HOB", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	loc, _ := resp.Location()
+	if loc == nil || loc.Path != "/organizer/HOB" {
+		t.Errorf("redirect = %v, want /organizer/HOB", loc)
+	}
+
+	var whatEn string
+	var draftCap int
+	err := db.QueryRow("SELECT what_en, draft_cap FROM events WHERE set_code=?", "HOB").Scan(&whatEn, &draftCap)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if whatEn != "Updated What" {
+		t.Errorf("what_en = %q, want Updated What", whatEn)
+	}
+	if draftCap != 10 {
+		t.Errorf("draft_cap = %d, want 10", draftCap)
+	}
+}
+
+func TestUnknownEvent(t *testing.T) {
+	db := testDB(t)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/NOPE/en/")
+	if err != nil {
+		t.Fatalf("get: %v", err)
 	}
 	defer resp.Body.Close()
-	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/en/" {
-		t.Errorf("redirect = %v, want /en/", loc)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "Event not found") {
+		t.Errorf("body missing 'Event not found': %q", string(body))
+	}
+}
+
+func TestPerEventWhatWhereRender(t *testing.T) {
+	db := testDB(t)
+	mustInsertEvent(t, db, "WW", "2026-08-07T17:30:00Z", "English What", "German What", "English Where", "German Where", "https://example.com", "https://example.com", 24, 8, 15, 30)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/WW/en/")
+	if err != nil {
+		t.Fatalf("get en: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{"English What", "English Where"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("en body missing %q: %q", want, string(body))
+		}
+	}
+
+	resp, err = http.Get(server.URL + "/WW/de/")
+	if err != nil {
+		t.Fatalf("get de: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	for _, want := range []string{"German What", "German Where"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("de body missing %q: %q", want, string(body))
+		}
+	}
+}
+
+func TestWhereLinkPerLang(t *testing.T) {
+	db := testDB(t)
+	mustInsertEvent(t, db, "WL", "2026-08-07T17:30:00Z", "What", "Was", "Where", "Wo", "https://en.example/link", "https://de.example/link", 24, 8, 15, 30)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/WL/en/")
+	if err != nil {
+		t.Fatalf("get en: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `href="https://en.example/link"`) {
+		t.Errorf("en page missing en where link: %s", string(body))
+	}
+
+	resp, err = http.Get(server.URL + "/WL/de/")
+	if err != nil {
+		t.Fatalf("get de: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), `href="https://de.example/link"`) {
+		t.Errorf("de page missing de where link: %s", string(body))
+	}
+}
+
+func TestEmailBodyIncludesSetCode(t *testing.T) {
+	db := testDB(t)
+	mustCreateEvent(t, db)
+	mailer := &fakeMailer{}
+	server := setupTestServer(t, db, mailer)
+	defer server.Close()
+
+	form := url.Values{}
+	form.Set("email", "setcode@example.com")
+	form.Set("name", "Set Code")
+	form.Set("format", "draft")
+	form.Set("cancellation_ack", "on")
+	form.Set("data_consent", "on")
+	form.Set("mailing_list", "yes")
+	client := noRedirectClient()
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/en/submit", form)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
+	}
+	if len(mailer.sends) != 1 {
+		t.Fatalf("sends = %d, want 1", len(mailer.sends))
+	}
+	if !strings.Contains(mailer.sends[0].body, "/HOB/en/pay?email=") {
+		t.Errorf("body missing /HOB/en/pay?email=: %q", mailer.sends[0].body)
+	}
+	if !strings.Contains(mailer.sends[0].body, "/HOB/en/cancel") {
+		t.Errorf("body missing /HOB/en/cancel: %q", mailer.sends[0].body)
 	}
 }
 
 func TestIndexGerman(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/de/")
+	resp, err := http.Get(server.URL + "/HOB/de/")
 	if err != nil {
-		t.Fatalf("get /de/: %v", err)
+		t.Fatalf("get /HOB/de/: %v", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -1575,6 +2177,7 @@ func TestIndexGerman(t *testing.T) {
 
 func TestSubmitGermanEmail(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1587,14 +2190,14 @@ func TestSubmitGermanEmail(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/de/submit", form)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || !strings.HasPrefix(loc.Path, "/de/pay") {
-		t.Errorf("redirect = %v, want /de/pay?...", loc)
+	if loc == nil || !strings.HasPrefix(loc.Path, "/HOB/de/pay") {
+		t.Errorf("redirect = %v, want /HOB/de/pay?...", loc)
 	}
 	if len(mailer.sends) != 1 {
 		t.Fatalf("sends = %d, want 1", len(mailer.sends))
@@ -1602,16 +2205,17 @@ func TestSubmitGermanEmail(t *testing.T) {
 	if !strings.Contains(mailer.sends[0].subject, "angemeldet") {
 		t.Errorf("subject not German: %q", mailer.sends[0].subject)
 	}
-	if !strings.Contains(mailer.sends[0].body, "/de/pay?email=") {
-		t.Errorf("body missing /de/pay link: %q", mailer.sends[0].body)
+	if !strings.Contains(mailer.sends[0].body, "/HOB/de/pay?email=") {
+		t.Errorf("body missing /HOB/de/pay link: %q", mailer.sends[0].body)
 	}
-	if !strings.Contains(mailer.sends[0].body, "/de/cancel") {
-		t.Errorf("body missing /de/cancel link: %q", mailer.sends[0].body)
+	if !strings.Contains(mailer.sends[0].body, "/HOB/de/cancel") {
+		t.Errorf("body missing /HOB/de/cancel link: %q", mailer.sends[0].body)
 	}
 }
 
 func TestSubmitLangPersisted(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1624,7 +2228,7 @@ func TestSubmitLangPersisted(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/de/submit", form)
 	resp.Body.Close()
 
 	var lang string
@@ -1639,12 +2243,13 @@ func TestSubmitLangPersisted(t *testing.T) {
 
 func TestPromotionUsesSignupLang(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	for i := 0; i < 24; i++ {
-		mustInsert(t, db, fmt.Sprintf("fill%d@example.com", i), fmt.Sprintf("Fill %d", i), "draft", "confirmed")
+		mustInsert(t, db, eventID, fmt.Sprintf("fill%d@example.com", i), fmt.Sprintf("Fill %d", i), "draft", "confirmed")
 	}
 
 	form := url.Values{}
@@ -1655,12 +2260,12 @@ func TestPromotionUsesSignupLang(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/de/submit", form)
 	resp.Body.Close()
 
 	form2 := url.Values{}
 	form2.Set("email", "fill0@example.com")
-	resp2, err := http.PostForm(server.URL+"/en/cancel", form2)
+	resp2, err := http.PostForm(server.URL+"/HOB/en/cancel", form2)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -1673,8 +2278,8 @@ func TestPromotionUsesSignupLang(t *testing.T) {
 	for _, s := range mailer.sends {
 		if s.to == "dewaiter@example.com" && strings.Contains(s.subject, "angemeldet") {
 			promotionFound = true
-			if !strings.Contains(s.body, "/de/pay?email=") {
-				t.Errorf("promotion body missing /de/pay link: %q", s.body)
+			if !strings.Contains(s.body, "/HOB/de/pay?email=") {
+				t.Errorf("promotion body missing /HOB/de/pay link: %q", s.body)
 			}
 		}
 	}
@@ -1685,15 +2290,16 @@ func TestPromotionUsesSignupLang(t *testing.T) {
 
 func TestCancelReceiptLocalized(t *testing.T) {
 	db := testDB(t)
+	eventID, _ := mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
-	mustInsert(t, db, "delang@example.com", "De Lang", "draft", "confirmed")
+	mustInsert(t, db, eventID, "delang@example.com", "De Lang", "draft", "confirmed")
 
 	form := url.Values{}
 	form.Set("email", "delang@example.com")
-	resp, err := http.PostForm(server.URL+"/de/cancel", form)
+	resp, err := http.PostForm(server.URL+"/HOB/de/cancel", form)
 	if err != nil {
 		t.Fatalf("post cancel: %v", err)
 	}
@@ -1709,12 +2315,13 @@ func TestCancelReceiptLocalized(t *testing.T) {
 
 func TestInvalidLangRedirects(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
 
 	client := noRedirectClient()
-	resp, err := client.Get(server.URL + "/fr/waitlist")
+	resp, err := client.Get(server.URL + "/HOB/fr/waitlist")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -1723,13 +2330,14 @@ func TestInvalidLangRedirects(t *testing.T) {
 		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusFound)
 	}
 	loc, _ := resp.Location()
-	if loc == nil || loc.Path != "/en/waitlist" {
-		t.Errorf("redirect = %v, want /en/waitlist", loc)
+	if loc == nil || loc.Path != "/HOB/en/waitlist" {
+		t.Errorf("redirect = %v, want /HOB/en/waitlist", loc)
 	}
 }
 
 func TestOrganizerEmailsEnglish(t *testing.T) {
 	db := testDB(t)
+	mustCreateEvent(t, db)
 	mailer := &fakeMailer{fail: map[int]bool{0: true}}
 	server := setupTestServer(t, db, mailer)
 	defer server.Close()
@@ -1742,7 +2350,7 @@ func TestOrganizerEmailsEnglish(t *testing.T) {
 	form.Set("data_consent", "on")
 	form.Set("mailing_list", "yes")
 	client := noRedirectClient()
-	resp := postFormNoRedirect(t, client, server.URL+"/de/submit", form)
+	resp := postFormNoRedirect(t, client, server.URL+"/HOB/de/submit", form)
 	resp.Body.Close()
 
 	if len(mailer.sends) < 2 {
@@ -1767,14 +2375,12 @@ func TestBuildMessageHeadersAndEncoding(t *testing.T) {
 	if !strings.Contains(msg, "Content-Transfer-Encoding: 8bit\r\n") {
 		t.Errorf("missing Content-Transfer-Encoding: 8bit:\n%s", msg)
 	}
-	// Non-ASCII subject must be RFC 2047 encoded, not emitted as raw bytes.
 	if strings.Contains(msg, "Subject: Prerelease – Du") {
 		t.Errorf("subject not RFC 2047 encoded (raw non-ASCII in header):\n%s", msg)
 	}
 	if !strings.Contains(msg, "Subject: =?utf-8") {
 		t.Errorf("subject missing =?utf-8 encoded-word:\n%s", msg)
 	}
-	// Body must be unchanged (8bit transport allows raw UTF-8 in body).
 	if !strings.Contains(msg, "\r\nHallo äöüß, Plaetze frei.\r\n") {
 		t.Errorf("body not preserved verbatim:\n%s", msg)
 	}

@@ -76,26 +76,26 @@
 <body>
 	<div class="card">
 		<div class="lang-switch">
-			<a href="/{{if eq .Lang "en"}}de{{else}}en{{end}}/"><button type="button">{{if eq .Lang "en"}}Deutsch{{else}}English{{end}}</button></a>
+			<a href="/{{.SetCode}}/{{if eq .Lang "en"}}de{{else}}en{{end}}/"><button type="button">{{if eq .Lang "en"}}Deutsch{{else}}English{{end}}</button></a>
 		</div>
 		<h1>{{T .Lang "prerelease_signup"}}</h1>
 
 		<table class="note-table">
 			<tr>
 				<th>{{T .Lang "note_what_label"}}:</th>
-				<td>{{T .Lang "note_what_value"}}</td>
+				<td>{{.WhatText}}</td>
 			</tr>
 			<tr>
 				<th>{{T .Lang "note_when_label"}}:</th>
-				<td>{{T .Lang "note_when_value"}}</td>
+				<td>{{.EventDate}}</td>
 			</tr>
 			<tr>
 				<th>{{T .Lang "note_where_label"}}:</th>
-				<td>{{T .Lang "note_where_value"}} <a href="https://mtg-cube.de/hedwig-english/">{{T .Lang "note_where_link"}}</a></td>
+				<td>{{.WhereText}} <a href="{{.WhereLink}}">{{T .Lang "note_where_link"}}</a></td>
 			</tr>
 		</table>
 
-		<form method="POST" action="/{{.Lang}}/submit">
+		<form method="POST" action="/{{.SetCode}}/{{.Lang}}/submit">
 			<label for="email">{{T .Lang "label_email"}}</label>
 			<input type="email" id="email" name="email" required>
 
@@ -105,8 +105,8 @@
 			<fieldset>
 				<legend>{{T .Lang "legend_format"}}</legend>
 				<div class="options">
-					<label><input type="radio" name="format" value="draft" required> Draft €15 ({{.DraftSeatsLeft}} {{T .Lang "seats_left"}}{{if eq .DraftSeatsLeft 0}}{{T .Lang "waitlist_suffix"}}{{end}})</label>
-					<label><input type="radio" name="format" value="sealed" required> Sealed €30 ({{.SealedSeatsLeft}} {{T .Lang "seats_left"}}{{if eq .SealedSeatsLeft 0}}{{T .Lang "waitlist_suffix"}}{{end}})</label>
+				<label><input type="radio" name="format" value="draft" required> Draft €{{printf "%.2f" .DraftPrice}} ({{.DraftSeatsLeft}} {{T .Lang "seats_left"}}{{if eq .DraftSeatsLeft 0}}{{T .Lang "waitlist_suffix"}}{{end}})</label>
+				<label><input type="radio" name="format" value="sealed" required> Sealed €{{printf "%.2f" .SealedPrice}} ({{.SealedSeatsLeft}} {{T .Lang "seats_left"}}{{if eq .SealedSeatsLeft 0}}{{T .Lang "waitlist_suffix"}}{{end}})</label>
 				</div>
 			</fieldset>
 

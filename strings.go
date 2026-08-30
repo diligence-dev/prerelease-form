@@ -13,11 +13,8 @@ var translations = map[string]map[string]string{
 	"en": {
 		"prerelease_signup":      "Prerelease Signup",
 		"note_what_label":        "What",
-		"note_what_value":        "Draft & Sealed from English Play Booster Displays (no Prerelease Packs), 3-round-tournament, no prizes",
 		"note_when_label":        "When",
-		"note_when_value":        "7 August 2026 at 17:30",
 		"note_where_label":       "Where",
-		"note_where_value":       "Ziegelstr. 4, 10117 Berlin; same Location as weekly draft:",
 		"note_where_link":        "how to find us",
 		"label_email":            "Email",
 		"label_name":             "Name",
@@ -76,6 +73,7 @@ var translations = map[string]map[string]string{
 		"msg_registration_cancelled": "Your registration has been cancelled.",
 		"msg_waitlist_cancelled":     "Your waitlist spot has been cancelled.",
 		"msg_invalid_method":         "Invalid method.",
+		"msg_unknown_event":          "Event not found.",
 
 		"subject_confirmed": "Prerelease - You're signed up",
 		"subject_waitlist":  "Prerelease - You're on the waitlist",
@@ -83,8 +81,8 @@ var translations = map[string]map[string]string{
 		"body_confirmed": `Hi %s,
 
 you are signed up for the prerelease - you will be playing %s!
-If you haven't already, pay for your spot here: %s/%s/pay?email=%s
-If you can no longer attend, cancel at %s/%s/cancel.
+If you haven't already, pay for your spot here: %s/%s/%s/pay?email=%s
+If you can no longer attend, cancel at %s/%s/%s/cancel.
 Looking forward to seeing you at the event!
 `,
 		"body_waitlist": `Hi %s,
@@ -93,17 +91,14 @@ Thanks for signing up for %s.
 All %s seats are currently taken, so you've been added to the waitlist.
 You'll receive another email with payment details as soon as a seat opens up for you.
 
-If you no longer wish to be on the waitlist, cancel at %s/%s/cancel.
+If you no longer wish to be on the waitlist, cancel at %s/%s/%s/cancel.
 `,
 	},
 	"de": {
 		"prerelease_signup":      "Prerelease Anmeldung",
 		"note_what_label":        "Was",
-		"note_what_value":        "Draft & Sealed aus englischen Play Booster Displays (keine Prerelease Packs), 3-Runden-Turnier, keine Preise",
 		"note_when_label":        "Wann",
-		"note_when_value":        "7. August 2026 um 17:30 Uhr",
 		"note_where_label":       "Wo",
-		"note_where_value":       "Ziegelstr. 4, 10117 Berlin; gleicher Ort wie wöchentlicher Draft:",
 		"note_where_link":        "wie du uns findest",
 		"label_email":            "E-Mail",
 		"label_name":             "Name",
@@ -162,6 +157,7 @@ If you no longer wish to be on the waitlist, cancel at %s/%s/cancel.
 		"msg_registration_cancelled": "Deine Anmeldung wurde storniert.",
 		"msg_waitlist_cancelled":     "Dein Wartelistenplatz wurde storniert.",
 		"msg_invalid_method":         "Ungültige Methode.",
+		"msg_unknown_event":          "Veranstaltung nicht gefunden.",
 
 		"subject_confirmed": "Prerelease - Du bist angemeldet",
 		"subject_waitlist":  "Prerelease - Du bist auf der Warteliste",
@@ -169,8 +165,8 @@ If you no longer wish to be on the waitlist, cancel at %s/%s/cancel.
 		"body_confirmed": `Hallo %s,
 
 du bist für den Prerelease angemeldet - du wirst %s spielen!
-Falls noch nicht geschehen, bezahle hier: %s/%s/pay?email=%s
-Wenn du nicht mehr teilnehmen kannst, storniere unter %s/%s/cancel.
+Falls noch nicht geschehen, bezahle hier: %s/%s/%s/pay?email=%s
+Wenn du nicht mehr teilnehmen kannst, storniere unter %s/%s/%s/cancel.
 Wir freuen uns, dich bei der Veranstaltung zu sehen!
 `,
 		"body_waitlist": `Hallo %s,
@@ -179,7 +175,7 @@ danke für deine Anmeldung für %s.
 Alle %s Plätze sind derzeit belegt, also wurdest du zur Warteliste hinzugefügt.
 Du wirst eine weitere E-Mail mit Zahlungsdaten erhalten, sobald ein Platz für dich frei wird.
 
-Wenn du nicht mehr auf der Warteliste sein möchtest, storniere unter %s/%s/cancel.
+Wenn du nicht mehr auf der Warteliste sein möchtest, storniere unter %s/%s/%s/cancel.
 `,
 	},
 }

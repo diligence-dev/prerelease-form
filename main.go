@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"math"
 	"mime"
 	"net/http"
 	"net/smtp"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -24,7 +26,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-//go:embed index.html pay.html waitlist.html cancel.html organizer.html organizer_login.html
+//go:embed index.html pay.html waitlist.html cancel.html organizer.html organizer_event.html organizer_login.html
 var embeddedFiles embed.FS
 
 type Mailer interface {
@@ -62,8 +64,6 @@ type config struct {
 	bic               string
 	organizerEmail    string
 	organizerPassword string
-	draftCap          int
-	sealedCap         int
 }
 
 // loadConfig reads configuration from the environment and validates required
@@ -78,8 +78,6 @@ func loadConfig() config {
 		bic:               os.Getenv("BIC"),
 		organizerEmail:    getenv("ORGANIZER_EMAIL", "diligence.dev@web.de"),
 		organizerPassword: os.Getenv("ORGANIZER_PASSWORD"),
-		draftCap:          getenvInt("CAPACITY_DRAFT", 24),
-		sealedCap:         getenvInt("CAPACITY_SEALED", 8),
 	}
 	if cfg.weroEmail == "" {
 		log.Fatalf("WERO_EMAIL not set")
@@ -148,38 +146,39 @@ func getenv(key, fallback string) string {
 	return fallback
 }
 
-func getenvInt(key string, fallback int) int {
-	v := os.Getenv(key)
-	if v == "" {
-		return fallback
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil || n <= 0 {
-		log.Fatalf("%s invalid: %q", key, v)
-	}
-	return n
-}
-
 func initSchema(db *sql.DB) error {
-	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS submissions (
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS events (
 		id INTEGER PRIMARY KEY,
-		email TEXT UNIQUE NOT NULL,
+		set_code TEXT UNIQUE NOT NULL,
+		date TEXT NOT NULL,
+		what_en TEXT NOT NULL,
+		what_de TEXT NOT NULL,
+		where_en TEXT NOT NULL,
+		where_de TEXT NOT NULL,
+		where_link_en TEXT NOT NULL DEFAULT '',
+		where_link_de TEXT NOT NULL DEFAULT '',
+		draft_cap INTEGER NOT NULL,
+		sealed_cap INTEGER NOT NULL,
+		draft_price REAL NOT NULL,
+		sealed_price REAL NOT NULL
+	)`)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS submissions (
+		id INTEGER PRIMARY KEY,
+		email TEXT NOT NULL,
 		name TEXT NOT NULL,
 		format TEXT NOT NULL,
 		mailing_list INTEGER DEFAULT 0,
 		created_at TEXT NOT NULL,
 		payment TEXT NOT NULL DEFAULT 'unknown',
 		status TEXT NOT NULL DEFAULT 'confirmed',
-		lang TEXT NOT NULL DEFAULT 'en'
+		lang TEXT NOT NULL DEFAULT 'en',
+		event_id INTEGER NOT NULL REFERENCES events(id),
+		UNIQUE(event_id, email)
 	)`)
-	if err != nil {
-		return err
-	}
-	_, err = db.Exec(`ALTER TABLE submissions ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'`)
-	if err != nil && !strings.Contains(err.Error(), "duplicate column") {
-		return err
-	}
-	return nil
+	return err
 }
 
 func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) {
@@ -205,31 +204,58 @@ func setupHandlers(db *sql.DB, mailer Mailer, cfg config) (http.Handler, error) 
 	if err != nil {
 		return nil, err
 	}
+	organizerEventTmpl, err := template.New("organizer_event.html").Funcs(funcMap).ParseFS(embeddedFiles, "organizer_event.html")
+	if err != nil {
+		return nil, err
+	}
 	organizerLoginTmpl, err := template.New("organizer_login.html").Funcs(funcMap).ParseFS(embeddedFiles, "organizer_login.html")
 	if err != nil {
 		return nil, err
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", rootRedirectHandler())
-	mux.HandleFunc("GET /{lang}/{$}", localizedHandler(indexHandler(db, indexTmpl, cfg.draftCap, cfg.sealedCap)))
-	mux.HandleFunc("POST /{lang}/submit", localizedHandler(submitHandler(db, mailer, cfg)))
-	mux.HandleFunc("GET /{lang}/pay", localizedHandler(payHandler(db, payTmpl, cfg)))
-	mux.HandleFunc("POST /{lang}/pay", localizedHandler(postPayHandler(db, cfg)))
-	mux.HandleFunc("GET /{lang}/waitlist", localizedHandler(waitlistHandler(waitlistTmpl)))
-	mux.HandleFunc("GET /{lang}/cancel", localizedHandler(cancelFormHandler(cancelTmpl)))
-	mux.HandleFunc("POST /{lang}/cancel", localizedHandler(cancelHandler(db, mailer, cfg)))
+	mux.HandleFunc("GET /{$}", latestEventHandler(db))
+	mux.HandleFunc("GET /{set_code}", eventLangRedirectHandler())
+	mux.HandleFunc("GET /{set_code}/{$}", eventLangRedirectHandler())
+	mux.HandleFunc("GET /{set_code}/{lang}/{$}", localizedHandler(indexHandler(db, indexTmpl)))
+	mux.HandleFunc("POST /{set_code}/{lang}/submit", localizedHandler(submitHandler(db, mailer, cfg)))
+	mux.HandleFunc("GET /{set_code}/{lang}/pay", localizedHandler(payHandler(db, payTmpl, cfg)))
+	mux.HandleFunc("POST /{set_code}/{lang}/pay", localizedHandler(postPayHandler(db, cfg)))
+	mux.HandleFunc("GET /{set_code}/{lang}/waitlist", localizedHandler(waitlistHandler(waitlistTmpl)))
+	mux.HandleFunc("GET /{set_code}/{lang}/cancel", localizedHandler(cancelFormHandler(cancelTmpl)))
+	mux.HandleFunc("POST /{set_code}/{lang}/cancel", localizedHandler(cancelHandler(db, mailer, cfg)))
 	mux.HandleFunc("GET /organizer", organizerHandler(db, organizerTmpl, cfg))
+	mux.HandleFunc("POST /organizer", organizerCreatePostHandler(db, organizerTmpl, cfg))
+	mux.HandleFunc("GET /organizer/{set_code}", organizerEventHandler(db, organizerEventTmpl, cfg))
+	mux.HandleFunc("POST /organizer/{set_code}", organizerEventPostHandler(db, organizerEventTmpl, cfg))
 	mux.HandleFunc("GET /organizer/login", organizerLoginHandler(organizerLoginTmpl))
 	mux.HandleFunc("POST /organizer/login", organizerLoginPostHandler(cfg, organizerLoginTmpl))
 	mux.HandleFunc("GET /health", healthHandler)
 	return mux, nil
 }
 
-func rootRedirectHandler() http.HandlerFunc {
+// latestEventHandler redirects "/" to the most recent event by date. If no
+// event exists the query returns no rows and the error surfaces as 500 (no
+// special handling, per the multi-event plan decision 6).
+func latestEventHandler(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		var setCode string
+		err := db.QueryRow("SELECT set_code FROM events ORDER BY date DESC LIMIT 1").Scan(&setCode)
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "no events")
+			return
+		}
+		http.Redirect(w, r, "/"+setCode, http.StatusFound)
+	}
+}
+
+// eventLangRedirectHandler redirects "/{set_code}" to the user's preferred
+// language based on the Accept-Language header.
+func eventLangRedirectHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		setCode := r.PathValue("set_code")
 		lang := parseAcceptLanguage(r.Header.Get("Accept-Language"))
-		http.Redirect(w, r, "/"+lang+"/", http.StatusFound)
+		http.Redirect(w, r, "/"+setCode+"/"+lang+"/", http.StatusFound)
 	}
 }
 
@@ -237,8 +263,9 @@ func localizedHandler(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
 		if lang != "en" && lang != "de" {
-			rest := strings.TrimPrefix(r.URL.Path, "/"+lang)
-			target := "/en" + rest
+			setCode := r.PathValue("set_code")
+			rest := strings.TrimPrefix(r.URL.Path, "/"+setCode+"/"+lang)
+			target := "/" + setCode + "/en" + rest
 			if r.URL.RawQuery != "" {
 				target += "?" + r.URL.RawQuery
 			}
@@ -249,35 +276,130 @@ func localizedHandler(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-type seatCounts struct {
+// event holds one row of the events table.
+type event struct {
+	ID          int64
+	SetCode     string
+	Date        string
+	WhatEn      string
+	WhatDe      string
+	WhereEn     string
+	WhereDe     string
+	WhereLinkEn string
+	WhereLinkDe string
+	DraftCap    int
+	SealedCap   int
+	DraftPrice  float64
+	SealedPrice float64
+}
+
+func loadEventBySetCode(db *sql.DB, setCode string) (event, error) {
+	var e event
+	err := db.QueryRow(`SELECT id, set_code, date, what_en, what_de, where_en, where_de, where_link_en, where_link_de, draft_cap, sealed_cap, draft_price, sealed_price FROM events WHERE set_code=?`, setCode).
+		Scan(&e.ID, &e.SetCode, &e.Date, &e.WhatEn, &e.WhatDe, &e.WhereEn, &e.WhereDe, &e.WhereLinkEn, &e.WhereLinkDe, &e.DraftCap, &e.SealedCap, &e.DraftPrice, &e.SealedPrice)
+	return e, err
+}
+
+var setCodeRe = regexp.MustCompile(`^[A-Z0-9]{2,8}$`)
+
+var reservedSetCodes = map[string]bool{
+	"organizer": true,
+	"health":    true,
+	"events":    true,
+	"new":       true,
+	"en":        true,
+	"de":        true,
+}
+
+// validSetCode reports whether code matches the format regex and is not a
+// reserved first-segment that would collide with an existing route.
+func validSetCode(code string) bool {
+	return setCodeRe.MatchString(code) && !reservedSetCodes[code]
+}
+
+var deMonths = map[string]string{
+	"January": "Januar", "February": "Februar", "March": "März",
+	"April": "April", "May": "Mai", "June": "Juni",
+	"July": "Juli", "August": "August", "September": "September",
+	"October": "Oktober", "November": "November", "December": "Dezember",
+}
+
+// formatDate renders an RFC3339 date in a human format, localised per lang.
+func formatDate(dateStr, lang string) string {
+	t, err := time.Parse(time.RFC3339, dateStr)
+	if err != nil {
+		return dateStr
+	}
+	month := t.Format("January")
+	if lang == "de" {
+		if de, ok := deMonths[month]; ok {
+			month = de
+		}
+		return fmt.Sprintf("%d. %s %d um %02d:%02d Uhr", t.Day(), month, t.Year(), t.Hour(), t.Minute())
+	}
+	return fmt.Sprintf("%d %s %d at %02d:%02d", t.Day(), month, t.Year(), t.Hour(), t.Minute())
+}
+
+type indexPageData struct {
 	Lang            string
+	SetCode         string
+	EventDate       string
+	WhatText        string
+	WhereText       string
+	WhereLink       string
+	DraftPrice      float64
+	SealedPrice     float64
 	DraftSeatsLeft  int
 	SealedSeatsLeft int
 }
 
-func indexHandler(db *sql.DB, tmpl *template.Template, draftCap, sealedCap int) http.HandlerFunc {
+func indexHandler(db *sql.DB, tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
-		draftLeft, err := seatsLeft(db, "draft", draftCap)
+		setCode := r.PathValue("set_code")
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusOK, T(lang, "msg_unknown_event"))
+			return
+		}
+		draftLeft, err := seatsLeft(db, e.ID, "draft", e.DraftCap)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
 		}
-		sealedLeft, err := seatsLeft(db, "sealed", sealedCap)
+		sealedLeft, err := seatsLeft(db, e.ID, "sealed", e.SealedCap)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
+		}
+		whatText, whereText := e.WhatEn, e.WhereEn
+		whereLink := e.WhereLinkEn
+		if lang == "de" {
+			whatText, whereText = e.WhatDe, e.WhereDe
+			whereLink = e.WhereLinkDe
+		}
+		data := indexPageData{
+			Lang:            lang,
+			SetCode:         setCode,
+			EventDate:       formatDate(e.Date, lang),
+			WhatText:        whatText,
+			WhereText:       whereText,
+			WhereLink:       whereLink,
+			DraftPrice:      e.DraftPrice,
+			SealedPrice:     e.SealedPrice,
+			DraftSeatsLeft:  draftLeft,
+			SealedSeatsLeft: sealedLeft,
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, seatCounts{Lang: lang, DraftSeatsLeft: draftLeft, SealedSeatsLeft: sealedLeft}); err != nil {
+		if err := tmpl.Execute(w, data); err != nil {
 			log.Printf("index template execute: %v", err)
 		}
 	}
 }
 
-func seatsLeft(db *sql.DB, format string, cap int) (int, error) {
+func seatsLeft(db *sql.DB, eventID int64, format string, cap int) (int, error) {
 	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND status='confirmed'", format).Scan(&count)
+	err := db.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND event_id=? AND status='confirmed'", format, eventID).Scan(&count)
 	if err != nil {
 		return 0, err
 	}
@@ -289,28 +411,32 @@ func seatsLeft(db *sql.DB, format string, cap int) (int, error) {
 }
 
 type waitlistData struct {
-	Lang string
+	Lang    string
+	SetCode string
 }
 
 func waitlistHandler(tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
+		setCode := r.PathValue("set_code")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, waitlistData{Lang: lang}); err != nil {
+		if err := tmpl.Execute(w, waitlistData{Lang: lang, SetCode: setCode}); err != nil {
 			log.Printf("waitlist template execute: %v", err)
 		}
 	}
 }
 
 type cancelData struct {
-	Lang string
+	Lang    string
+	SetCode string
 }
 
 func cancelFormHandler(tmpl *template.Template) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
+		setCode := r.PathValue("set_code")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := tmpl.Execute(w, cancelData{Lang: lang}); err != nil {
+		if err := tmpl.Execute(w, cancelData{Lang: lang, SetCode: setCode}); err != nil {
 			log.Printf("cancel template execute: %v", err)
 		}
 	}
@@ -335,6 +461,13 @@ func hasNewline(s string) bool {
 func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
+		setCode := r.PathValue("set_code")
+
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusOK, T(lang, "msg_unknown_event"))
+			return
+		}
 
 		if err := r.ParseForm(); err != nil {
 			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_form"))
@@ -366,11 +499,11 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			return
 		}
 
-		cap := cfg.draftCap
-		amount := 15
+		cap := e.DraftCap
+		amount := e.DraftPrice
 		if format == "sealed" {
-			cap = cfg.sealedCap
-			amount = 30
+			cap = e.SealedCap
+			amount = e.SealedPrice
 		}
 
 		mailingListInt := 0
@@ -386,7 +519,7 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		defer tx.Rollback()
 
 		var confirmedCount int
-		err = tx.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND status='confirmed'", format).Scan(&confirmedCount)
+		err = tx.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND event_id=? AND status='confirmed'", format, e.ID).Scan(&confirmedCount)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 			return
@@ -399,8 +532,8 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		createdAt := time.Now().UTC().Format(time.RFC3339)
 		_, err = tx.Exec(
-			"INSERT INTO submissions (email, name, format, mailing_list, created_at, status, lang) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			email, name, format, mailingListInt, createdAt, status, lang,
+			"INSERT INTO submissions (email, name, format, mailing_list, created_at, status, lang, event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			email, name, format, mailingListInt, createdAt, status, lang, e.ID,
 		)
 		if err != nil {
 			if strings.Contains(err.Error(), "UNIQUE") {
@@ -421,15 +554,15 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		var subject, body string
 		if status == "confirmed" {
 			subject = T(lang, "subject_confirmed")
-			body = confirmationEmailBody(name, format, email, host, lang)
+			body = confirmationEmailBody(name, format, email, host, setCode, lang)
 		} else {
 			subject = T(lang, "subject_waitlist")
-			body = T(lang, "body_waitlist", name, formatName(format), seatTotal(format, cap), host, lang)
+			body = T(lang, "body_waitlist", name, formatName(format), seatTotal(format, cap), host, setCode, lang)
 		}
 
 		if err := mailer.Send(email, subject, body); err != nil {
 			log.Printf("failed to send %s email to %s: %v", status, email, err)
-			amountLabel := fmt.Sprintf("€%d", amount)
+			amountLabel := formatEuro(amount)
 			if status == "waitlist" {
 				amountLabel = "waitlist"
 			}
@@ -442,9 +575,9 @@ func submitHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 		}
 
 		if status == "confirmed" {
-			http.Redirect(w, r, "/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
+			http.Redirect(w, r, "/"+setCode+"/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
 		} else {
-			http.Redirect(w, r, "/"+lang+"/waitlist", http.StatusFound)
+			http.Redirect(w, r, "/"+setCode+"/"+lang+"/waitlist", http.StatusFound)
 		}
 	}
 }
@@ -460,8 +593,8 @@ func seatTotal(format string, cap int) string {
 	return fmt.Sprintf("%d %s", cap, formatName(format))
 }
 
-func confirmationEmailBody(name, format, email, host, lang string) string {
-	return T(lang, "body_confirmed", name, formatName(format), host, lang, url.QueryEscape(email), host, lang)
+func confirmationEmailBody(name, format, email, host, setCode, lang string) string {
+	return T(lang, "body_confirmed", name, formatName(format), host, setCode, lang, url.QueryEscape(email), host, setCode, lang)
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -479,23 +612,67 @@ type organizerRow struct {
 	Strike  bool
 }
 
-// organizerPageData wraps the submission rows with per-format seat counts
-// shown next to the export button. Counted covers confirmed plus waitlist
-// (cancelled rows excluded); Capacity is the configured seat cap.
+// organizerEventListItem is one row of the event list on /organizer.
+type organizerEventListItem struct {
+	SetCode     string
+	Date        string
+	DraftCount  int
+	DraftCap    int
+	SealedCount int
+	SealedCap   int
+}
+
+// organizerPageData backs organizer.html: the create form plus the event list.
 type organizerPageData struct {
-	Rows           []organizerRow
-	DraftCount     int
-	DraftCapacity  int
-	SealedCount    int
-	SealedCapacity int
+	Events []organizerEventListItem
+	Error  string
+}
+
+// organizerEventPageData backs organizer_event.html: the edit form plus the
+// per-event submission table.
+type organizerEventPageData struct {
+	Event       event
+	DateInput   string
+	TimeInput   string
+	Rows        []organizerRow
+	DraftCount  int
+	SealedCount int
+	Error       string
 }
 
 // signupCount returns the number of confirmed plus waitlist submissions for
-// the given format (cancelled rows excluded).
-func signupCount(db *sql.DB, format string) (int, error) {
+// the given event and format (cancelled rows excluded).
+func signupCount(db *sql.DB, eventID int64, format string) (int, error) {
 	var count int
-	err := db.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND status IN ('confirmed','waitlist')", format).Scan(&count)
+	err := db.QueryRow("SELECT COUNT(*) FROM submissions WHERE format=? AND event_id=? AND status IN ('confirmed','waitlist')", format, eventID).Scan(&count)
 	return count, err
+}
+
+// loadOrganizerEventList returns all events with per-format signup counts,
+// newest event first.
+func loadOrganizerEventList(db *sql.DB) ([]organizerEventListItem, error) {
+	rows, err := db.Query(`SELECT set_code, date, draft_cap, sealed_cap,
+		(SELECT COUNT(*) FROM submissions WHERE event_id=e.id AND format='draft' AND status IN ('confirmed','waitlist')),
+		(SELECT COUNT(*) FROM submissions WHERE event_id=e.id AND format='sealed' AND status IN ('confirmed','waitlist'))
+		FROM events e ORDER BY date DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []organizerEventListItem
+	for rows.Next() {
+		var it organizerEventListItem
+		var dateStr string
+		if err := rows.Scan(&it.SetCode, &dateStr, &it.DraftCap, &it.SealedCap, &it.DraftCount, &it.SealedCount); err != nil {
+			return nil, err
+		}
+		it.Date = dateStr
+		if t, err := time.Parse(time.RFC3339, dateStr); err == nil {
+			it.Date = t.Format("2006-01-02 15:04")
+		}
+		items = append(items, it)
+	}
+	return items, rows.Err()
 }
 
 const sessionCookieName = "organizer_session"
@@ -583,21 +760,136 @@ func organizerLoginPostHandler(cfg config, tmpl *template.Template) http.Handler
 	}
 }
 
+// renderOrganizerPage renders the organizer list/create page. When errMsg is
+// non-empty it responds 400 so validation failures are signalled distinctly.
+func renderOrganizerPage(w http.ResponseWriter, tmpl *template.Template, items []organizerEventListItem, errMsg string) {
+	if errMsg != "" {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, organizerPageData{Events: items, Error: errMsg}); err != nil {
+		log.Printf("organizer template execute: %v", err)
+	}
+}
+
 func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !validSession(r, cfg) {
 			http.Redirect(w, r, "/organizer/login", http.StatusFound)
 			return
 		}
+		items, err := loadOrganizerEventList(db)
+		if err != nil {
+			writeText(w, http.StatusInternalServerError, "server error")
+			return
+		}
+		renderOrganizerPage(w, tmpl, items, "")
+	}
+}
+
+// parsePositiveInt parses a strictly positive integer form field.
+func parsePositiveInt(s string) (int, bool) {
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// parsePositiveFloat parses a strictly positive decimal form field.
+func parsePositiveFloat(s string) (float64, bool) {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || f <= 0 {
+		return 0, false
+	}
+	return f, true
+}
+
+// formatEuro renders a price as a two-decimal euro string.
+func formatEuro(amount float64) string {
+	return fmt.Sprintf("€%.2f", amount)
+}
+
+// combineDateTime joins a "2006-01-02" date and "15:04" time into RFC3339 UTC.
+func combineDateTime(date, timeStr string) (string, bool) {
+	t, err := time.Parse("2006-01-02T15:04", date+"T"+timeStr)
+	if err != nil {
+		return "", false
+	}
+	return t.UTC().Format(time.RFC3339), true
+}
+
+func organizerCreatePostHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !validSession(r, cfg) {
+			http.Redirect(w, r, "/organizer/login", http.StatusFound)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			writeText(w, http.StatusBadRequest, "bad form")
+			return
+		}
+		setCode := strings.TrimSpace(r.FormValue("set_code"))
+		date := strings.TrimSpace(r.FormValue("date"))
+		timeStr := strings.TrimSpace(r.FormValue("time"))
+		whatEn := strings.TrimSpace(r.FormValue("what_en"))
+		whatDe := strings.TrimSpace(r.FormValue("what_de"))
+		whereEn := strings.TrimSpace(r.FormValue("where_en"))
+		whereDe := strings.TrimSpace(r.FormValue("where_de"))
+		whereLinkEn := strings.TrimSpace(r.FormValue("where_link_en"))
+		whereLinkDe := strings.TrimSpace(r.FormValue("where_link_de"))
+		draftCap, okD := parsePositiveInt(r.FormValue("draft_cap"))
+		sealedCap, okS := parsePositiveInt(r.FormValue("sealed_cap"))
+		draftPrice, okDP := parsePositiveFloat(r.FormValue("draft_price"))
+		sealedPrice, okSP := parsePositiveFloat(r.FormValue("sealed_price"))
+
+		items, _ := loadOrganizerEventList(db)
+		rfc3339, okT := combineDateTime(date, timeStr)
+		switch {
+		case !validSetCode(setCode):
+			renderOrganizerPage(w, tmpl, items, "invalid set code")
+			return
+		case !okT:
+			renderOrganizerPage(w, tmpl, items, "invalid date or time")
+			return
+		case whatEn == "" || whatDe == "" || whereEn == "" || whereDe == "":
+			renderOrganizerPage(w, tmpl, items, "what/where fields required")
+			return
+		case !okD || !okS || !okDP || !okSP:
+			renderOrganizerPage(w, tmpl, items, "capacities must be positive integers and prices must be positive")
+			return
+		}
+
+		_, err := db.Exec(`INSERT INTO events (set_code, date, what_en, what_de, where_en, where_de, where_link_en, where_link_de, draft_cap, sealed_cap, draft_price, sealed_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			setCode, rfc3339, whatEn, whatDe, whereEn, whereDe, whereLinkEn, whereLinkDe, draftCap, sealedCap, draftPrice, sealedPrice)
+		if err != nil {
+			renderOrganizerPage(w, tmpl, items, "set code already exists")
+			return
+		}
+		http.Redirect(w, r, "/organizer/"+setCode, http.StatusFound)
+	}
+}
+
+func organizerEventHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !validSession(r, cfg) {
+			http.Redirect(w, r, "/organizer/login", http.StatusFound)
+			return
+		}
+		setCode := r.PathValue("set_code")
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusNotFound, "event not found")
+			return
+		}
 
 		rows, err := db.Query(`SELECT id, email, name, format, mailing_list, created_at, payment, status, lang
-			FROM submissions
-			ORDER BY CASE status
+			FROM submissions WHERE event_id=? ORDER BY CASE status
 				WHEN 'confirmed' THEN 0
 				WHEN 'waitlist'  THEN 1
 				WHEN 'cancelled' THEN 2
 				ELSE 3
-			END, name COLLATE NOCASE ASC`)
+			END, name COLLATE NOCASE ASC`, e.ID)
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
@@ -606,9 +898,9 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 
 		if r.URL.Query().Get("export") == "csv" {
 			w.Header().Set("Content-Type", "text/csv")
-			w.Header().Set("Content-Disposition", "attachment; filename=\"submissions.csv\"")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s.csv\"", setCode))
 			writer := csv.NewWriter(w)
-			if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status", "lang"}); err != nil {
+			if err := writer.Write([]string{"id", "email", "name", "format", "mailing_list", "created_at", "payment", "status", "lang", "set_code"}); err != nil {
 				log.Printf("csv write header: %v", err)
 				return
 			}
@@ -621,14 +913,10 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 				}
 				if err := writer.Write([]string{
 					fmt.Sprintf("%d", id),
-					email,
-					name,
-					format,
+					email, name, format,
 					fmt.Sprintf("%d", mailingList),
-					createdAt,
-					payment,
-					status,
-					lang,
+					createdAt, payment, status, lang,
+					setCode,
 				}); err != nil {
 					log.Printf("csv write row: %v", err)
 					return
@@ -661,35 +949,118 @@ func organizerHandler(db *sql.DB, tmpl *template.Template, cfg config) http.Hand
 			})
 		}
 
-		draftCount, err := signupCount(db, "draft")
+		draftCount, err := signupCount(db, e.ID, "draft")
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
-		sealedCount, err := signupCount(db, "sealed")
+		sealedCount, err := signupCount(db, e.ID, "sealed")
 		if err != nil {
 			writeText(w, http.StatusInternalServerError, "server error")
 			return
 		}
 
-		data := organizerPageData{
-			Rows:           organizerRows,
-			DraftCount:     draftCount,
-			DraftCapacity:  cfg.draftCap,
-			SealedCount:    sealedCount,
-			SealedCapacity: cfg.sealedCap,
+		dateInput, timeInput := "", ""
+		if t, err := time.Parse(time.RFC3339, e.Date); err == nil {
+			dateInput = t.Format("2006-01-02")
+			timeInput = t.Format("15:04")
 		}
-
+		data := organizerEventPageData{
+			Event:       e,
+			DateInput:   dateInput,
+			TimeInput:   timeInput,
+			Rows:        organizerRows,
+			DraftCount:  draftCount,
+			SealedCount: sealedCount,
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := tmpl.Execute(w, data); err != nil {
-			log.Printf("organizer template execute: %v", err)
+			log.Printf("organizer event template execute: %v", err)
 		}
+	}
+}
+
+func renderOrganizerEventPage(w http.ResponseWriter, tmpl *template.Template, data organizerEventPageData, errMsg string) {
+	data.Error = errMsg
+	if errMsg != "" {
+		w.WriteHeader(http.StatusBadRequest)
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := tmpl.Execute(w, data); err != nil {
+		log.Printf("organizer event template execute: %v", err)
+	}
+}
+
+func organizerEventPostHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !validSession(r, cfg) {
+			http.Redirect(w, r, "/organizer/login", http.StatusFound)
+			return
+		}
+		setCode := r.PathValue("set_code")
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusNotFound, "event not found")
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			writeText(w, http.StatusBadRequest, "bad form")
+			return
+		}
+		newSetCode := strings.TrimSpace(r.FormValue("set_code"))
+		date := strings.TrimSpace(r.FormValue("date"))
+		timeStr := strings.TrimSpace(r.FormValue("time"))
+		whatEn := strings.TrimSpace(r.FormValue("what_en"))
+		whatDe := strings.TrimSpace(r.FormValue("what_de"))
+		whereEn := strings.TrimSpace(r.FormValue("where_en"))
+		whereDe := strings.TrimSpace(r.FormValue("where_de"))
+		whereLinkEn := strings.TrimSpace(r.FormValue("where_link_en"))
+		whereLinkDe := strings.TrimSpace(r.FormValue("where_link_de"))
+		draftCap, okD := parsePositiveInt(r.FormValue("draft_cap"))
+		sealedCap, okS := parsePositiveInt(r.FormValue("sealed_cap"))
+		draftPrice, okDP := parsePositiveFloat(r.FormValue("draft_price"))
+		sealedPrice, okSP := parsePositiveFloat(r.FormValue("sealed_price"))
+
+		// Pre-build the page data for the error re-render path.
+		dateInput, timeInput := date, timeStr
+		data := organizerEventPageData{Event: e, DateInput: dateInput, TimeInput: timeInput}
+
+		rfc3339, okT := combineDateTime(date, timeStr)
+		switch {
+		case !validSetCode(newSetCode):
+			renderOrganizerEventPage(w, tmpl, data, "invalid set code")
+			return
+		case !okT:
+			renderOrganizerEventPage(w, tmpl, data, "invalid date or time")
+			return
+		case whatEn == "" || whatDe == "" || whereEn == "" || whereDe == "":
+			renderOrganizerEventPage(w, tmpl, data, "what/where fields required")
+			return
+		case !okD || !okS || !okDP || !okSP:
+			renderOrganizerEventPage(w, tmpl, data, "capacities must be positive integers and prices must be positive")
+			return
+		}
+
+		_, err = db.Exec(`UPDATE events SET set_code=?, date=?, what_en=?, what_de=?, where_en=?, where_de=?, where_link_en=?, where_link_de=?, draft_cap=?, sealed_cap=?, draft_price=?, sealed_price=? WHERE id=?`,
+			newSetCode, rfc3339, whatEn, whatDe, whereEn, whereDe, whereLinkEn, whereLinkDe, draftCap, sealedCap, draftPrice, sealedPrice, e.ID)
+		if err != nil {
+			renderOrganizerEventPage(w, tmpl, data, "set code already exists")
+			return
+		}
+		http.Redirect(w, r, "/organizer/"+newSetCode, http.StatusFound)
 	}
 }
 
 func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
+		setCode := r.PathValue("set_code")
+
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusOK, T(lang, "msg_unknown_event"))
+			return
+		}
 
 		if err := r.ParseForm(); err != nil {
 			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_form"))
@@ -704,7 +1075,7 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 		var id int
 		var name, format, status string
-		err := db.QueryRow("SELECT id, name, format, status FROM submissions WHERE email=?", email).Scan(&id, &name, &format, &status)
+		err = db.QueryRow("SELECT id, name, format, status FROM submissions WHERE event_id=? AND email=?", e.ID, email).Scan(&id, &name, &format, &status)
 		if err == sql.ErrNoRows {
 			writeText(w, http.StatusOK, T(lang, "msg_no_registration"))
 			return
@@ -737,7 +1108,7 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 			var promotedID int
 			var promotedEmail, promotedName, promotedLang string
-			err = tx.QueryRow("SELECT id, email, name, lang FROM submissions WHERE format=? AND status='waitlist' ORDER BY created_at ASC LIMIT 1", format).Scan(&promotedID, &promotedEmail, &promotedName, &promotedLang)
+			err = tx.QueryRow("SELECT id, email, name, lang FROM submissions WHERE format=? AND event_id=? AND status='waitlist' ORDER BY created_at ASC LIMIT 1", format, e.ID).Scan(&promotedID, &promotedEmail, &promotedName, &promotedLang)
 			promoted := err == nil
 			if promoted {
 				_, err = tx.Exec("UPDATE submissions SET status='confirmed' WHERE id=?", promotedID)
@@ -751,19 +1122,19 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 				writeText(w, http.StatusInternalServerError, T(lang, "msg_server_error"))
 				return
 			}
-			amount := 15
+			amount := e.DraftPrice
 			if format == "sealed" {
-				amount = 30
+				amount = e.SealedPrice
 			}
 
 			if promoted {
 				subject := T(promotedLang, "subject_confirmed")
-				body := confirmationEmailBody(promotedName, format, promotedEmail, host, promotedLang)
+				body := confirmationEmailBody(promotedName, format, promotedEmail, host, setCode, promotedLang)
 				if err := mailer.Send(promotedEmail, subject, body); err != nil {
 					log.Printf("failed to send promotion email to %s: %v", promotedEmail, err)
 					failSubject := fmt.Sprintf("Failed to send payment mail to %s", promotedEmail)
-					failBody := fmt.Sprintf("Timestamp: %s\nName: %s\nEmail: %s\nFormat: %s\nAmount: €%d\nError: %v",
-						time.Now().UTC().Format(time.RFC3339), promotedName, promotedEmail, format, amount, err)
+					failBody := fmt.Sprintf("Timestamp: %s\nName: %s\nEmail: %s\nFormat: %s\nAmount: %s\nError: %v",
+						time.Now().UTC().Format(time.RFC3339), promotedName, promotedEmail, format, formatEuro(amount), err)
 					if notifyErr := mailer.Send(cfg.organizerEmail, failSubject, failBody); notifyErr != nil {
 						log.Printf("failed to send failure notification: %v", notifyErr)
 					}
@@ -773,9 +1144,9 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			notifySubject := fmt.Sprintf("Cancelled: %s", email)
 			var notifyBody string
 			if promoted {
-				notifyBody = fmt.Sprintf("%s (%s) cancelled their %s spot. The seat went to %s (%s).", name, email, format, promotedName, promotedEmail)
+				notifyBody = fmt.Sprintf("%s (%s) cancelled their %s spot for %s. The seat went to %s (%s).", name, email, format, setCode, promotedName, promotedEmail)
 			} else {
-				notifyBody = fmt.Sprintf("%s (%s) cancelled their %s spot. No one is on the waitlist for %s.", name, email, format, format)
+				notifyBody = fmt.Sprintf("%s (%s) cancelled their %s spot for %s. No one is on the waitlist for %s.", name, email, format, setCode, format)
 			}
 			if err := mailer.Send(cfg.organizerEmail, notifySubject, notifyBody); err != nil {
 				log.Printf("failed to send organizer notification: %v", err)
@@ -793,7 +1164,7 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 			}
 
 			subject := fmt.Sprintf("Cancelled waitlist: %s", email)
-			body := fmt.Sprintf("%s (%s) cancelled their %s waitlist spot.", name, email, format)
+			body := fmt.Sprintf("%s (%s) cancelled their %s waitlist spot for %s.", name, email, format, setCode)
 			if err := mailer.Send(cfg.organizerEmail, subject, body); err != nil {
 				log.Printf("failed to send organizer notification: %v", err)
 			}
@@ -808,9 +1179,10 @@ func cancelHandler(db *sql.DB, mailer Mailer, cfg config) http.HandlerFunc {
 
 type payPageData struct {
 	Lang          string
+	SetCode       string
 	Email         string
 	Format        string
-	Amount        int
+	Amount        float64
 	WeroEmail     string
 	WeroLink      string
 	WeroQR        template.HTML
@@ -825,15 +1197,22 @@ type payPageData struct {
 func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
+		setCode := r.PathValue("set_code")
 		email := strings.TrimSpace(r.URL.Query().Get("email"))
 		if email == "" || !strings.Contains(email, "@") || hasNewline(email) {
 			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
 		}
 
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusOK, T(lang, "msg_unknown_event"))
+			return
+		}
+
 		var id int
 		var format, payment, status string
-		err := db.QueryRow("SELECT id, format, payment, status FROM submissions WHERE email=?", email).Scan(&id, &format, &payment, &status)
+		err = db.QueryRow("SELECT id, format, payment, status FROM submissions WHERE event_id=? AND email=?", e.ID, email).Scan(&id, &format, &payment, &status)
 		if err == sql.ErrNoRows {
 			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
@@ -848,13 +1227,13 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 			return
 		}
 
-		amount := 15
+		amount := e.DraftPrice
 		if format == "sealed" {
-			amount = 30
+			amount = e.SealedPrice
 		}
-		weroLinkWithAmount := fmt.Sprintf("%s?a=%d00&c=EUR", cfg.weroLink, amount)
+		weroLinkWithAmount := fmt.Sprintf("%s?a=%d&c=EUR", cfg.weroLink, int(math.Round(amount*100)))
 
-		reference := fmt.Sprintf("Prerelease id %d", id)
+		reference := fmt.Sprintf("Prerelease %s id %d", setCode, id)
 		epcPayloadText := epcPayload(cfg.bic, cfg.ibanRecipient, cfg.iban, amount, reference)
 		epcQR, err := qrSVG(epcPayloadText, 8)
 		if err != nil {
@@ -869,6 +1248,7 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 
 		data := payPageData{
 			Lang:          lang,
+			SetCode:       setCode,
 			Email:         email,
 			Format:        formatName(format),
 			Amount:        amount,
@@ -893,6 +1273,7 @@ func payHandler(db *sql.DB, tmpl *template.Template, cfg config) http.HandlerFun
 func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		lang := r.PathValue("lang")
+		setCode := r.PathValue("set_code")
 		if err := r.ParseForm(); err != nil {
 			writeText(w, http.StatusBadRequest, T(lang, "msg_invalid_form"))
 			return
@@ -911,9 +1292,15 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 			return
 		}
 
+		e, err := loadEventBySetCode(db, setCode)
+		if err != nil {
+			writeText(w, http.StatusOK, T(lang, "msg_unknown_event"))
+			return
+		}
+
 		var id int
 		var payment, status string
-		err := db.QueryRow("SELECT id, payment, status FROM submissions WHERE email=?", email).Scan(&id, &payment, &status)
+		err = db.QueryRow("SELECT id, payment, status FROM submissions WHERE event_id=? AND email=?", e.ID, email).Scan(&id, &payment, &status)
 		if err == sql.ErrNoRows {
 			writeText(w, http.StatusOK, T(lang, "msg_not_available"))
 			return
@@ -929,7 +1316,7 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 		}
 
 		if payment != "unknown" {
-			http.Redirect(w, r, "/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
+			http.Redirect(w, r, "/"+setCode+"/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
 			return
 		}
 
@@ -944,12 +1331,12 @@ func postPayHandler(db *sql.DB, cfg config) http.HandlerFunc {
 			return
 		}
 
-		http.Redirect(w, r, "/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
+		http.Redirect(w, r, "/"+setCode+"/"+lang+"/pay?email="+url.QueryEscape(email), http.StatusFound)
 	}
 }
 
-func epcPayload(bic, recipient, iban string, amount int, reference string) string {
-	amt := strings.Replace(fmt.Sprintf("%.2f", float64(amount)), ".", ",", 1)
+func epcPayload(bic, recipient, iban string, amount float64, reference string) string {
+	amt := strings.Replace(fmt.Sprintf("%.2f", amount), ".", ",", 1)
 	return fmt.Sprintf("BCD\r\n001\r\n1\r\nSCT\r\n%s\r\n%s\r\n%s\r\nEUR%s\r\n\r\n\r\n%s\r\n\r\n",
 		bic, recipient, iban, amt, reference)
 }
