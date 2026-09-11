@@ -44,9 +44,12 @@ func (m smtpMailer) Send(to, subject, body string) error {
 	return smtp.SendMail(addr, auth, m.from, []string{to}, msg)
 }
 
+const replyToAddress = "magicdraftberlin@posteo.de"
+
 func buildMessage(from, to, subject, body string) []byte {
 	return []byte("From: " + from + "\r\n" +
 		"To: " + to + "\r\n" +
+		"Reply-To: " + replyToAddress + "\r\n" +
 		"Subject: " + mime.QEncoding.Encode("utf-8", subject) + "\r\n" +
 		"Content-Type: text/plain; charset=utf-8\r\n" +
 		"Content-Transfer-Encoding: 8bit\r\n" +

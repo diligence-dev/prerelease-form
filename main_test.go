@@ -2385,3 +2385,39 @@ func TestBuildMessageHeadersAndEncoding(t *testing.T) {
 		t.Errorf("body not preserved verbatim:\n%s", msg)
 	}
 }
+
+func TestReplyToAddressConstant(t *testing.T) {
+	const want = "magicdraftberlin@posteo.de"
+	if replyToAddress != want {
+		t.Errorf("replyToAddress = %q, want %q", replyToAddress, want)
+	}
+}
+
+func TestBuildMessageReplyTo(t *testing.T) {
+	msg := string(buildMessage("diligence.bot@web.de", "user@example.com", "Subject", "Body"))
+
+	wantHeader := "Reply-To: magicdraftberlin@posteo.de\r\n"
+	if !strings.Contains(msg, wantHeader) {
+		t.Fatalf("missing Reply-To header %q in message:\n%s", wantHeader, msg)
+	}
+	if got := strings.Count(msg, "Reply-To:"); got != 1 {
+		t.Errorf("Reply-To header count = %d, want 1:\n%s", got, msg)
+	}
+	if !strings.Contains(msg, "From: diligence.bot@web.de\r\n") {
+		t.Errorf("missing From header:\n%s", msg)
+	}
+	if !strings.Contains(msg, "To: user@example.com\r\n") {
+		t.Errorf("missing To header:\n%s", msg)
+	}
+	// Reply-To must appear before Subject per buildMessage ordering.
+	replyIdx := strings.Index(msg, "Reply-To:")
+	subjectIdx := strings.Index(msg, "Subject:")
+	if replyIdx < 0 || subjectIdx < 0 || replyIdx > subjectIdx {
+		t.Errorf("Reply-To should appear before Subject: replyIdx=%d subjectIdx=%d\n%s", replyIdx, subjectIdx, msg)
+	}
+	// Also verify with non-ASCII subject encoding still preserves Reply-To.
+	msg2 := string(buildMessage("from@example.com", "to@example.com", "Prerelease – äöü", "body"))
+	if !strings.Contains(msg2, wantHeader) {
+		t.Errorf("Reply-To missing with non-ASCII subject:\n%s", msg2)
+	}
+}
