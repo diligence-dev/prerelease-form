@@ -53,24 +53,33 @@
 			color: #fff;
 		}
 		button:hover { background: #1d4ed8; }
+		hr { border: none; border-top: 1px solid #ddd; margin: 1.5rem 0; }
 	</style>
 </head>
 <body>
 	<div class="card">
-		{{if eq .Payment "unknown"}}
+		{{if ne .Payment "unknown"}}
+		<h1>{{T .Lang "heading_thanks"}}</h1>
+		{{if eq .Payment "paid"}}<p>{{T .Lang "recorded_payment"}}</p>{{end}}
+		{{if eq .Payment "cash"}}<p>{{T .Lang "recorded_cash"}}</p>{{end}}
+		<p>{{T .Lang "look_forward"}}</p>
+		<p><em>{{T .Lang "pay_later_note"}}</em></p>
+		<hr>
+		{{else}}
 		<h1>{{T .Lang "heading_pay" .Format}}</h1>
+		{{end}}
 
 		<details>
 			<summary>{{T .Lang "summary_wero"}}</summary>
 			<div class="content">
-			    <p class="method-info">{{T .Lang "scan_wero"}}</p>
+				<p class="method-info">{{T .Lang "scan_wero"}}</p>
 				{{.WeroQR}}
 				<p class="method-info">{{T .Lang "or_pay_via"}} <a href="{{.WeroLink}}">Wero</a></p>
 				<p class="method-info">{{T .Lang "or_manually"}}</p>
 				<table class="method-info">
 					<tr><td>{{T .Lang "label_recipient"}}</td><td>{{.WeroEmail}}</td></tr>
-				<tr><td>{{T .Lang "label_amount"}}</td><td>€{{printf "%.2f" .Amount}}</td></tr>
-				<tr><td>{{T .Lang "label_message"}}</td><td>{{.Reference}}</td></tr>
+					<tr><td>{{T .Lang "label_amount"}}</td><td>€{{printf "%.2f" .Amount}}</td></tr>
+					<tr><td>{{T .Lang "label_message"}}</td><td>{{.Reference}}</td></tr>
 				</table>
 				<form method="POST" action="/{{.SetCode}}/{{.Lang}}/pay">
 					<input type="hidden" name="email" value="{{.Email}}">
@@ -83,7 +92,7 @@
 		<details>
 			<summary>{{T .Lang "summary_iban"}}</summary>
 			<div class="content">
-			    <p class="method-info">{{T .Lang "scan_banking"}}</p>
+				<p class="method-info">{{T .Lang "scan_banking"}}</p>
 				{{.EpcQR}}
 				<table class="method-info">
 					<tr><td>{{T .Lang "label_recipient"}}</td><td>{{.IBANRecipient}}</td></tr>
@@ -111,12 +120,8 @@
 				</form>
 			</div>
 		</details>
-		{{else}}
-		<h1>{{T .Lang "heading_thanks"}}</h1>
-		{{if eq .Payment "paid"}}<p>{{T .Lang "recorded_payment"}}</p>{{end}}
-		{{if eq .Payment "cash"}}<p>{{T .Lang "recorded_cash"}}</p>{{end}}
-		<p>{{T .Lang "look_forward"}}</p>
-		{{end}}
+
+		<p class="note" style="margin-top:1.5rem">{{T .Lang "pay_later_info"}}</p>
 	</div>
 </body>
 </html>

@@ -1473,16 +1473,13 @@ func TestPayPageAlreadyPaid(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if strings.Contains(string(body), "Done, I've paid") {
-		t.Errorf("body should not contain payment options: %s", string(body))
-	}
-	for _, opt := range []string{"Pay via Wero", "Pay via IBAN", "Pay Cash"} {
-		if strings.Contains(string(body), opt) {
-			t.Errorf("body should not contain option %q: %s", opt, string(body))
-		}
-	}
 	if !strings.Contains(string(body), "recorded your payment") {
 		t.Errorf("body should show confirmation: %s", string(body))
+	}
+	for _, want := range []string{"Pay via Wero", "Pay via IBAN", "Pay Cash", "<svg", "If you actually have not paid yet", "<details", "confirmation email"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("body missing %q after paid (should show collapsed details): %s", want, string(body))
+		}
 	}
 }
 
@@ -1507,6 +1504,11 @@ func TestPayPageCashMarked(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(body), "pay cash at the event") {
 		t.Errorf("body should show cash confirmation: %s", string(body))
+	}
+	for _, want := range []string{"Pay via Wero", "Pay via IBAN", "Pay Cash", "<svg", "If you actually have not paid yet", "<details", "confirmation email"} {
+		if !strings.Contains(string(body), want) {
+			t.Errorf("cash page missing %q (should show collapsed details): %s", want, string(body))
+		}
 	}
 }
 

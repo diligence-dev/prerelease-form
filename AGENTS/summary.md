@@ -40,8 +40,8 @@ database, users confirm payment.
 - `GET /{set_code}` — redirects (302) to `/{set_code}/<lang>/` based on `Accept-Language`.
 - `GET /{set_code}/{lang}/` — per-event signup form with live seat counts, lang = `en` or `de`. Unknown set code → 200 `msg_unknown_event`.
 - `POST /{set_code}/{lang}/submit` — validates input (rejects CR/LF in email/name), resolves `event_id` from set code, inserts confirmed or waitlist row scoped to the event, sends localized email. Confirmed users redirect to `/{set_code}/{lang}/pay?email=...`, waitlist to `/{set_code}/{lang}/waitlist`.
-- `GET /{set_code}/{lang}/pay?email=<urlencoded>` — payment page with amounts from the event (rendered as `€%.2f`), or confirmation if already paid, localized. The Wero link carries the amount in whole cents (`?a=<cents>&c=EUR`); the EPC QR encodes a SEPA transfer with a two-decimal euro amount.
-- `POST /{set_code}/{lang}/pay` — records payment method (wero/iban/cash), redirects back to GET.
+- `GET /{set_code}/{lang}/pay?email=<urlencoded>` — payment page with amounts from the event (rendered as `€%.2f`), showing 3 collapsed `<details>` blocks (Wero/IBAN/cash); when `payment != unknown` also shows thanks banner (`recorded_payment`/`recorded_cash`) + `pay_later_note` above the collapsed blocks; static `pay_later_info` at bottom notes the confirmation mail contains the pay link. The Wero link carries the amount in whole cents (`?a=<cents>&c=EUR`); the EPC QR encodes a SEPA transfer with a two-decimal euro amount.
+- `POST /{set_code}/{lang}/pay` — records payment method (wero/iban→`paid`, cash→`cash`), redirects back to GET.
 - `GET /{set_code}/{lang}/waitlist` — waitlist notice, localized.
 - `GET /{set_code}/{lang}/cancel` — cancellation form, localized.
 - `POST /{set_code}/{lang}/cancel` — cancels by email (scoped to the event), promotes oldest waitlister for the same event + format, emails promoted person (in waiter's signup language) and notifies organizer (always English).
