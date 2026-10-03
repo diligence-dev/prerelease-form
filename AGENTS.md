@@ -1,6 +1,14 @@
 - read @AGENTS/summary.md for code overview
-- never build manually (i.e. never run `go build` or `make build`), assume `air` is running, if it is not, run `source .env; air &`
+- never build manually (i.e. never run `go build` or `make build`), assume `air` is running, if it is not, run `source .env; air &` (the server exits at startup without the env vars from `.env`); air's build output and errors land in `tmp/`
 - don't finish until `go vet ./...; gofmt -l` is clear
+
+# repo
+- single Go binary, no CGO (`modernc.org/sqlite`); all server code is in `main.go`, all HTML templates are `go:embed`ded, i18n strings in `strings.go`
+- tests (`go test ./...`) are hermetic: stdlib only, fake mailer, temp DB — no `.env` needed; single test: `go test -run '^TestName$' .`
+- pushing to `main` deploys to production on Fly.io (`.github/workflows/fly.yml`)
+- `.env` is gitignored and holds secrets — never print, copy, or commit its values
+- schema changes have no migration mechanism yet (`initSchema` only does `CREATE TABLE IF NOT EXISTS`); the next time the schema changes, implement migrations — don't just delete `data.db`
+- Makefile only launches opencode/air inside the nono sandbox — it has no build targets
 
 # values
 ## simplicity - less is better

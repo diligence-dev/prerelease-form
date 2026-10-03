@@ -32,7 +32,7 @@ database, users confirm payment.
 - `fly.toml` — Fly.io configuration.
 - `.github/workflows/fly.yml` — GitHub Action that runs `flyctl deploy --remote-only` on push to `main` (requires `FLY_API_TOKEN` repo secret).
 - `plan.md` — implementation plan.
-- `AGENTS/AGENTS.md` — agent guidelines.
+- `AGENTS.md` — agent guidelines.
 - `AGENTS/summary.md` — this file.
 
 ## Endpoints
