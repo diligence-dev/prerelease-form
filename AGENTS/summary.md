@@ -29,7 +29,7 @@ database, users confirm payment.
 - `main_test.go` — table-driven tests with a fake `Mailer` and temp database.
 - `go.mod` / `go.sum` — Go module files.
 - `Dockerfile` — multi-stage scratch build.
-- `fly.toml` — Fly.io configuration.
+- `fly.toml` — Fly.io configuration: auto-suspends the machine after ~5 min of idle traffic and auto-starts it on the next request (`auto_stop_machines = "suspend"`, `auto_start_machines = true`).
 - `.github/workflows/fly.yml` — GitHub Action that runs `flyctl deploy --remote-only` on push to `main` (requires `FLY_API_TOKEN` repo secret).
 - `plan.md` — implementation plan.
 - `AGENTS.md` — agent guidelines.
